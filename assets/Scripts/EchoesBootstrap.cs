@@ -1,22 +1,17 @@
-using System.Collections;
-using UnityEngine;
-using UnityEngine.UI;
-using TMPro;
-
 // ============================================================
 //  EchoesBootstrap.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: 2.4.1  |  16 June 2026
+//  Version: v2.4.5-diag | 17 June 2026
 //
-//  CHANGELOG v2.4.0:
-//   - Logo now FLASHES for 0.5s then hands over to the guided
-//     scan controller (replaces the phased loading screen).
-//   - Locks landscape orientation (POC).
-//   - Builds Canvas, logo flash, scan controller + HUD + uploader.
-//
-//  Attach to: your XR Origin (or any persistent GameObject).
-//  Replaces EchoesLoadingScreenBootstrap from v2.3.4.
+//  DIAGNOSTIC BUILD
 // ============================================================
+
+using System.Collections;
+using System.IO;
+using System;
+using UnityEngine;
+using UnityEngine.UI;
+using TMPro;
 
 public class EchoesBootstrap : MonoBehaviour
 {
@@ -30,13 +25,31 @@ public class EchoesBootstrap : MonoBehaviour
     public string uploadUrl = "";
 
     private static Color C(float r,float g,float b,float a=1f)=>new Color(r,g,b,a);
-    private static readonly Color Deep   = C(0.076f,0.020f,0.137f);
-    private static readonly Color Light  = C(0.949f,0.902f,1.000f);
+    private static readonly Color Deep  = C(0.076f,0.020f,0.137f);
+    private static readonly Color Light = C(0.949f,0.902f,1.000f);
 
     private GameObject _logoCanvas;
 
+    // Shared diag log -- Bootstrap writes here before Controller exists
+    public static System.Collections.Generic.List<string> DiagLog = new System.Collections.Generic.List<string>();
+    public static string DiagPath;
+
+    public static void Diag(string msg)
+    {
+        string line = $"{DateTime.Now:HH:mm:ss.fff} {msg}";
+        DiagLog.Add(line);
+        Debug.Log("[DIAG] " + line);
+        if (!string.IsNullOrEmpty(DiagPath))
+            try { File.AppendAllText(DiagPath, line + "\n"); } catch {}
+    }
+
     void Awake()
     {
+        DiagPath = Path.Combine(Application.persistentDataPath, "echoes_diag.txt");
+        try { File.WriteAllText(DiagPath, $"=== ECHOES DIAG v2.4.5-diag {DateTime.Now} ===\n"); } catch {}
+
+        Diag("Bootstrap.Awake() FIRED");
+
         if (lockLandscape)
         {
             Screen.orientation = ScreenOrientation.LandscapeLeft;
@@ -44,9 +57,11 @@ public class EchoesBootstrap : MonoBehaviour
             Screen.autorotateToPortraitUpsideDown = false;
             Screen.autorotateToLandscapeLeft = true;
             Screen.autorotateToLandscapeRight = true;
+            Diag("Bootstrap: landscape locked");
         }
 
         BuildLogoFlash();
+        Diag("Bootstrap: logo flash built, starting HandOver coroutine");
         StartCoroutine(HandOver());
     }
 
@@ -82,11 +97,14 @@ public class EchoesBootstrap : MonoBehaviour
 
     private IEnumerator HandOver()
     {
+        Diag($"Bootstrap.HandOver() START -- waiting {logoFlashSeconds}s");
         yield return new WaitForSeconds(logoFlashSeconds);
+        Diag("Bootstrap.HandOver() wait complete -- destroying logo");
 
         if (_logoCanvas != null) Destroy(_logoCanvas);
 
         // Build the scan controller canvas
+        Diag("Bootstrap: creating EchoesScanCanvas");
         var canvasGO = new GameObject("EchoesScanCanvas");
         var canvas = canvasGO.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -103,13 +121,19 @@ public class EchoesBootstrap : MonoBehaviour
         rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
         rt.offsetMin = rt.offsetMax = Vector2.zero;
 
-        // Controller + HUD (HUD builds UI in Awake, before controller Start)
+        // Controller MUST be added before HUD
+        Diag("Bootstrap: AddComponent<EchoesScanController>() -- CONTROLLER FIRST");
         screenGO.AddComponent<EchoesScanController>();
+
+        Diag("Bootstrap: AddComponent<EchoesScanHUD>() -- HUD SECOND");
         screenGO.AddComponent<EchoesScanHUD>();
 
-        // Uploader (separate persistent object)
+        Diag("Bootstrap: both components added");
+
+        // Uploader
         var up = new GameObject("EchoesScanUploader").AddComponent<EchoesScanUploader>();
         up.uploadUrl = uploadUrl;
         DontDestroyOnLoad(up.gameObject);
+        Diag("Bootstrap.HandOver() COMPLETE");
     }
 }
