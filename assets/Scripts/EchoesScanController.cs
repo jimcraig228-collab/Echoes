@@ -1,6 +1,6 @@
 // ============================================================
 //  EchoesScanController.cs
-//  Version: v2.4.3
+//  Version: v2.4.4
 //
 //  Architecture (from EchoesBootstrap.cs):
 //    Bootstrap creates "ScanController" GameObject on a Canvas,
@@ -179,22 +179,21 @@ public class EchoesScanController : MonoBehaviour
     //  Lifecycle
     // -------------------------------------------------------
 
-    private void Awake()
+    private void Start()
     {
-        _cameraManager     = FindObjectOfType<ARCameraManager>();
-        _planeManager      = FindObjectOfType<ARPlaneManager>();
+        _cameraManager = FindObjectOfType<ARCameraManager>();
+        _planeManager = FindObjectOfType<ARPlaneManager>();
         _pointCloudManager = FindObjectOfType<ARPointCloudManager>();
-        _occlusionManager  = FindObjectOfType<AROcclusionManager>();
-        _debugManager      = FindObjectOfType<ARDebugManager>();
+        _occlusionManager = FindObjectOfType<AROcclusionManager>();
+        _debugManager = FindObjectOfType<ARDebugManager>();
 
         if (PlayerPrefs.HasKey("echoes_saved_pitch"))
         {
-            _savedPitch   = PlayerPrefs.GetFloat("echoes_saved_pitch");
-            _savedHeight  = PlayerPrefs.GetFloat("echoes_saved_height");
+            _savedPitch = PlayerPrefs.GetFloat("echoes_saved_pitch");
+            _savedHeight = PlayerPrefs.GetFloat("echoes_saved_height");
             _savedHeading = PlayerPrefs.GetFloat("echoes_saved_heading");
             _hasSavedPose = true;
         }
-    }
 
     private void OnEnable()
     {
