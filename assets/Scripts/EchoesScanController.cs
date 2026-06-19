@@ -1,14 +1,15 @@
 // ============================================================
 //  EchoesScanController.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.5-diag | 17 June 2026
+//  Version: v2.4.5-final | 19 June 2026
 //
-//  DIAGNOSTIC BUILD -- logs every lifecycle event to screen
-//  and to persistentDataPath/echoes_diag.txt
-//  Pull with adb: adb pull /sdcard/Android/data/[pkg]/files/echoes_diag.txt
+//  v2.4.5-final -- Listener wiring fixed via one-frame-delayed
+//  coroutine. Closes out the v2.4.5 button listener fix line.
+//  Diagnostic overlay retained for this build; strip before v2.4.6.
 // ============================================================
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -21,7 +22,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.5-diag-b";
+    private const string VERSION = "v2.4.5-final";
 
     [HideInInspector] public BorderColorRelay   borderRelay;
     [HideInInspector] public TextMeshProUGUI    promptText;
@@ -201,15 +202,10 @@ public class EchoesScanController : MonoBehaviour
 
         if (_cameraManager != null) _cameraManager.frameReceived += OnCameraFrame;
 
-        if (startStopButton != null)
-            startStopButton.onClick.AddListener(OnStartStopPressed);
-        else
-            Diag("  *** startStopButton IS NULL -- no click handler wired ***");
-
-        if (setPoseButton != null)
-            setPoseButton.onClick.AddListener(OnSetPosePressed);
-        else
-            Diag("  *** setPoseButton IS NULL -- no click handler wired ***");
+        // Listener wiring deferred -- HUD injects button refs in its own Start(),
+        // which is not guaranteed to run before this Start() in the same frame.
+        // See WireListenersNextFrame().
+        StartCoroutine(WireListenersNextFrame());
 
         InitSession();
         SetPrompt("DIAG MODE -- check screen log");
@@ -219,6 +215,29 @@ public class EchoesScanController : MonoBehaviour
         else SetPrompt("Waiting for camera...");
 
         Diag("Controller.Start() COMPLETE");
+    }
+
+    private IEnumerator WireListenersNextFrame()
+    {
+        // Wait one frame so EchoesScanHUD.Start() has run and injected button refs,
+        // regardless of MonoBehaviour Start() ordering within this frame.
+        yield return null;
+
+        Diag("Controller.WireListenersNextFrame() FIRED -- 1 frame after Start()");
+        Diag($"  startStopButton null={startStopButton == null}");
+        Diag($"  setPoseButton null={setPoseButton == null}");
+
+        if (startStopButton != null)
+            startStopButton.onClick.AddListener(OnStartStopPressed);
+        else
+            Diag("  *** startStopButton STILL NULL after 1 frame -- listener NOT wired ***");
+
+        if (setPoseButton != null)
+            setPoseButton.onClick.AddListener(OnSetPosePressed);
+        else
+            Diag("  *** setPoseButton STILL NULL after 1 frame -- listener NOT wired ***");
+
+        Diag("Controller.WireListenersNextFrame() COMPLETE");
     }
 
     private void Update()
