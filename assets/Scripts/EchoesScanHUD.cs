@@ -1,11 +1,25 @@
 // ============================================================
 //  EchoesScanHUD.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.5-diag | 17 June 2026
+//  Version: v2.4.6 | 26 June 2026
 //
-//  DIAGNOSTIC BUILD -- logs every step of UI injection
+//  v2.4.6 — Guided Scan Overlay UI.
+//  Builds, on top of the existing HUD, the guided overlay:
+//    - Crosshair (static white dot, flashes on capture)
+//    - Four independent zone borders (per-edge addressable)
+//    - Four directional arrows (left/right/up/down)
+//    - Instruction banner (bottom-centre, above control bar)
+//    - Progress bar (time-based fill, swappable source later)
+//  All wired through GuidedOverlayRelay, injected into the
+//  controller the same one-frame-deferred way as the existing
+//  refs.
+//
+//  The original single-colour BorderColorRelay is retained for
+//  the pose-gate border behaviour. A NEW per-edge relay drives
+//  the guided zone borders independently (spec 4.2).
 // ============================================================
 
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -19,13 +33,17 @@ public class EchoesScanHUD : MonoBehaviour
     private static readonly Color Light  = C(0.949f,0.902f,1.000f);
     private static readonly Color Msg    = C(0.784f,0.659f,0.941f);
 
+    private static readonly Color ZoneNeutral = new Color(1f,1f,1f,0.18f);
+    private static readonly Color ZoneAmber   = new Color(0.900f,0.600f,0.100f,0.95f);
+    private static readonly Color ZoneGreen   = new Color(0.200f,0.800f,0.400f,0.95f);
+    private static readonly Color White       = new Color(1f,1f,1f,0.9f);
+
     void Start()
     {
-        EchoesBootstrap.Diag("HUD.Awake() FIRED");
+        EchoesBootstrap.Diag("HUD.Start() FIRED v2.4.6");
 
         var ctrl = GetComponent<EchoesScanController>();
         EchoesBootstrap.Diag($"HUD: GetComponent<EchoesScanController>() null={ctrl == null}");
-
         if (ctrl == null)
         {
             EchoesBootstrap.Diag("HUD: *** CONTROLLER IS NULL -- cannot inject refs ***");
@@ -34,9 +52,8 @@ public class EchoesScanHUD : MonoBehaviour
 
         var root = GetComponent<RectTransform>();
         Stretch(root);
-        EchoesBootstrap.Diag("HUD: root RectTransform stretched");
 
-        // Border frame
+        // --- Existing pose-gate border frame (single-colour relay) ---
         var border = NewImage("Border", root, new Color(0.6f,0.6f,0.6f,0.4f));
         Stretch(border.rectTransform);
         var frameParent = NewEmpty("BorderFrame", root);
@@ -51,35 +68,89 @@ public class EchoesScanHUD : MonoBehaviour
         ctrl.borderRelay = relay;
         EchoesBootstrap.Diag("HUD: borderRelay injected");
 
-        // Top prompt
+        // --- Top prompt ---
         var prompt = NewTMP("Prompt", root, "", 22f, true, Light);
-        Anchor(prompt.rectTransform, 0.5f, 0.90f, 900f, 80f);
+        Anchor(prompt.rectTransform, 0.5f, 0.92f, 1100f, 70f);
         prompt.alignment = TextAlignmentOptions.Center;
         ctrl.promptText = prompt;
-        EchoesBootstrap.Diag("HUD: promptText injected");
 
-        // Bottom HUD
+        // --- Bottom HUD (status line) ---
         var hud = NewTMP("Hud", root, "", 15f, false, Msg);
-        Anchor(hud.rectTransform, 0.5f, 0.10f, 900f, 60f);
+        Anchor(hud.rectTransform, 0.5f, 0.14f, 900f, 40f);
         hud.alignment = TextAlignmentOptions.Center;
         ctrl.hudText = hud;
-        EchoesBootstrap.Diag("HUD: hudText injected");
 
-        // START/STOP button
+        // ==========================================================
+        //  GUIDED OVERLAY (v2.4.6)
+        // ==========================================================
+        var overlayParent = NewEmpty("GuidedOverlay", root);
+        Stretch(overlayParent);
+
+        // Crosshair — static white dot, centre
+        var cross = NewImage("Crosshair", overlayParent, White);
+        Anchor(cross.rectTransform, 0.5f, 0.5f, 16f, 16f);
+
+        // Four guided zone borders — independently addressable
+        var gTop = EdgeBar("ZTop",   overlayParent, new Vector2(0,1), new Vector2(1,1), 18f, true);
+        var gBot = EdgeBar("ZBot",   overlayParent, new Vector2(0,0), new Vector2(1,0), 18f, true);
+        var gLft = EdgeBar("ZLeft",  overlayParent, new Vector2(0,0), new Vector2(0,1), 18f, false);
+        var gRgt = EdgeBar("ZRight", overlayParent, new Vector2(1,0), new Vector2(1,1), 18f, false);
+        gTop.color = gBot.color = gLft.color = gRgt.color = ZoneNeutral;
+
+        // Four directional arrows (text glyphs for zero-asset simplicity)
+        var aLeft  = NewTMP("ArrowLeft",  overlayParent, "\u25C0", 54f, true, ZoneAmber); // ◀
+        var aRight = NewTMP("ArrowRight", overlayParent, "\u25B6", 54f, true, ZoneAmber); // ▶
+        var aUp    = NewTMP("ArrowUp",    overlayParent, "\u25B2", 54f, true, ZoneAmber); // ▲
+        var aDown  = NewTMP("ArrowDown",  overlayParent, "\u25BC", 54f, true, ZoneAmber); // ▼
+        Anchor(aLeft.rectTransform,  0.08f, 0.5f, 80f, 80f);
+        Anchor(aRight.rectTransform, 0.92f, 0.5f, 80f, 80f);
+        Anchor(aUp.rectTransform,    0.5f, 0.82f, 80f, 80f);
+        Anchor(aDown.rectTransform,  0.5f, 0.20f, 80f, 80f);
+        aLeft.alignment = aRight.alignment = aUp.alignment = aDown.alignment = TextAlignmentOptions.Center;
+        // hidden by default
+        SetAlpha(aLeft, 0f); SetAlpha(aRight, 0f); SetAlpha(aUp, 0f); SetAlpha(aDown, 0f);
+
+        // Instruction banner — bottom-centre, above control bar
+        var banner = NewTMP("InstructionBanner", overlayParent, "", 20f, true, White);
+        Anchor(banner.rectTransform, 0.5f, 0.22f, 1200f, 50f);
+        banner.alignment = TextAlignmentOptions.Center;
+
+        // Progress bar — track + fill, bottom
+        var track = NewImage("ProgressTrack", overlayParent, new Color(1f,1f,1f,0.12f));
+        Anchor(track.rectTransform, 0.5f, 0.165f, 1000f, 10f);
+        var fillGo = new GameObject("ProgressFill", typeof(RectTransform), typeof(Image));
+        fillGo.transform.SetParent(track.transform, false);
+        var fill = fillGo.GetComponent<Image>();
+        fill.color = ZoneAmber; fill.raycastTarget = false;
+        var fillRt = fill.rectTransform;
+        fillRt.anchorMin = new Vector2(0f, 0f);
+        fillRt.anchorMax = new Vector2(0f, 1f);   // width driven by anchorMax.x at runtime
+        fillRt.pivot = new Vector2(0f, 0.5f);
+        fillRt.offsetMin = fillRt.offsetMax = Vector2.zero;
+
+        // --- START/STOP button ---
         var (btn, lbl) = NewButton("StartStop", root, "START", Purple, Light);
         Anchor(btn.GetComponent<RectTransform>(), 0.5f, 0.04f, 220f, 64f);
         ctrl.startStopButton = btn;
         ctrl.startStopLabel  = lbl;
-        EchoesBootstrap.Diag($"HUD: startStopButton injected -- btn null={btn == null}");
 
-        // SET POSE button
+        // --- SET POSE button ---
         var (sbtn, slbl) = NewButton("SetPose", root, "SET POSE",
                                      new Color(0.2f,0.1f,0.35f,0.9f), Msg);
         Anchor(sbtn.GetComponent<RectTransform>(), 0.88f, 0.04f, 150f, 50f);
         ctrl.setPoseButton = sbtn;
-        EchoesBootstrap.Diag($"HUD: setPoseButton injected -- sbtn null={sbtn == null}");
 
-        EchoesBootstrap.Diag("HUD.Awake() COMPLETE -- all refs injected");
+        // --- Wire up the guided overlay relay ---
+        var gRelay = overlayParent.gameObject.AddComponent<GuidedOverlayRelay>();
+        gRelay.borderTop = gTop; gRelay.borderBottom = gBot; gRelay.borderLeft = gLft; gRelay.borderRight = gRgt;
+        gRelay.arrowLeft = aLeft; gRelay.arrowRight = aRight; gRelay.arrowUp = aUp; gRelay.arrowDown = aDown;
+        gRelay.crosshair = cross; gRelay.banner = banner; gRelay.progressFill = fill;
+        gRelay.neutral = ZoneNeutral; gRelay.amber = ZoneAmber; gRelay.green = ZoneGreen; gRelay.white = White;
+        gRelay.Init();
+        ctrl.overlay = gRelay;
+        EchoesBootstrap.Diag("HUD: guided overlay injected");
+
+        EchoesBootstrap.Diag("HUD.Start() COMPLETE -- all refs injected");
     }
 
     // --- Builders ---
@@ -147,9 +218,14 @@ public class EchoesScanHUD : MonoBehaviour
         rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
         rt.offsetMin = rt.offsetMax = Vector2.zero;
     }
+
+    private static void SetAlpha(TextMeshProUGUI t, float a)
+    {
+        var c = t.color; c.a = a; t.color = c;
+    }
 }
 
-// Relays one colour to the four border bars.
+// Relays one colour to the four border bars (pose-gate frame, unchanged).
 public class BorderColorRelay : MonoBehaviour
 {
     public Image[] bars;
@@ -157,4 +233,132 @@ public class BorderColorRelay : MonoBehaviour
     {
         if (bars != null) foreach (var b in bars) if (b) b.color = c;
     }
+}
+
+// ============================================================
+//  GuidedOverlayRelay (v2.4.6)
+//  Drives the guided overlay elements independently. The
+//  controller calls these; no scan logic lives here.
+// ============================================================
+public class GuidedOverlayRelay : MonoBehaviour
+{
+    public Image borderTop, borderBottom, borderLeft, borderRight;
+    public TextMeshProUGUI arrowLeft, arrowRight, arrowUp, arrowDown;
+    public Image crosshair;
+    public TextMeshProUGUI banner;
+    public Image progressFill;
+
+    public Color neutral, amber, green, white;
+
+    // track which borders are "complete" (stay green)
+    private readonly HashSet<EchoesScanController.Zone> _complete = new HashSet<EchoesScanController.Zone>();
+    private float _flashTimer = -1f;
+
+    public void Init()
+    {
+        ResetForSession();
+    }
+
+    public void ResetForSession()
+    {
+        _complete.Clear();
+        SetBorder(borderTop, neutral); SetBorder(borderBottom, neutral);
+        SetBorder(borderLeft, neutral); SetBorder(borderRight, neutral);
+        HideAllArrows();
+        if (banner != null) { banner.text = ""; SetTextAlpha(banner, white.a); }
+        SetProgress(0f);
+        if (crosshair != null) SetImageAlpha(crosshair, white.a);
+    }
+
+    // Map a zone to its border edge + arrow
+    private Image BorderFor(EchoesScanController.Zone z)
+    {
+        switch (z)
+        {
+            case EchoesScanController.Zone.Centre: return borderTop;   // centre uses top edge as its marker
+            case EchoesScanController.Zone.Left:   return borderLeft;
+            case EchoesScanController.Zone.Right:  return borderRight;
+            case EchoesScanController.Zone.Tilt:   return borderBottom; // tilt-up marker on bottom; arrow handles direction
+            default: return borderTop;
+        }
+    }
+
+    private TextMeshProUGUI ArrowFor(EchoesScanController.Zone z)
+    {
+        switch (z)
+        {
+            case EchoesScanController.Zone.Left:  return arrowLeft;
+            case EchoesScanController.Zone.Right: return arrowRight;
+            case EchoesScanController.Zone.Tilt:  return arrowUp;      // tilt = up
+            default: return null;                                     // centre = no arrow
+        }
+    }
+
+    public void SetActiveZone(EchoesScanController.Zone z, Color amberColor)
+    {
+        HideAllArrows();
+        // keep completed borders green, set the active one amber
+        var b = BorderFor(z);
+        if (b != null && !_complete.Contains(z)) b.color = amberColor;
+        var a = ArrowFor(z);
+        if (a != null) SetTextAlpha(a, 1f);
+    }
+
+    public void SetInstruction(string text, Color c)
+    {
+        if (banner != null) { banner.text = text; banner.color = new Color(c.r,c.g,c.b, white.a); }
+    }
+
+    public void SetZoneComplete(EchoesScanController.Zone z, Color greenColor)
+    {
+        _complete.Add(z);
+        var b = BorderFor(z);
+        if (b != null) b.color = greenColor;
+        var a = ArrowFor(z);
+        if (a != null) SetTextAlpha(a, 0f);
+    }
+
+    public void SetAllBordersComplete()
+    {
+        SetBorder(borderTop, green); SetBorder(borderBottom, green);
+        SetBorder(borderLeft, green); SetBorder(borderRight, green);
+        HideAllArrows();
+        SetProgress(1f);
+    }
+
+    public void SetProgress(float p01)
+    {
+        if (progressFill == null) return;
+        var rt = progressFill.rectTransform;
+        rt.anchorMax = new Vector2(Mathf.Clamp01(p01), 1f);
+        rt.offsetMin = rt.offsetMax = Vector2.zero;
+    }
+
+    public void FlashCapture()
+    {
+        _flashTimer = 0.12f; // brief single white flash
+        if (crosshair != null) crosshair.color = Color.white;
+    }
+
+    private void Update()
+    {
+        if (_flashTimer >= 0f)
+        {
+            _flashTimer -= Time.deltaTime;
+            if (_flashTimer < 0f && crosshair != null)
+                crosshair.color = white;  // restore
+        }
+    }
+
+    private void HideAllArrows()
+    {
+        if (arrowLeft) SetTextAlpha(arrowLeft, 0f);
+        if (arrowRight) SetTextAlpha(arrowRight, 0f);
+        if (arrowUp) SetTextAlpha(arrowUp, 0f);
+        if (arrowDown) SetTextAlpha(arrowDown, 0f);
+    }
+
+    private void SetBorder(Image b, Color c) { if (b) b.color = c; }
+    private static void SetTextAlpha(TextMeshProUGUI t, float a) { if (!t) return; var c=t.color; c.a=a; t.color=c; }
+    private static void SetImageAlpha(Image i, float a) { if (!i) return; var c=i.color; c.a=a; i.color=c; }
 }
