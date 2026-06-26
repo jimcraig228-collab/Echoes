@@ -36,7 +36,7 @@ public class EchoesScanController : MonoBehaviour
     public bool  gateOnHeight   = false;
     public bool  gateOnDistance = false;
     public bool  gateOnHeading  = false;
-    public float targetPitch       = 35f;
+    public float targetPitch       = -35f;
     public float pitchToleranceDeg = 8f;
 
     [Header("Waypoints")]

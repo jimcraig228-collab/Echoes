@@ -399,6 +399,7 @@ GameObject:
   - component: {fileID: 223974235}
   - component: {fileID: 223974237}
   - component: {fileID: 223974238}
+  - component: {fileID: 223974239}
   m_Layer: 0
   m_Name: XR Origin
   m_TagString: Untagged
@@ -569,14 +570,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 910ea4cff266a2b4f8219b692c291da7, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ARDebugManager
-  arSession: {fileID: 0}
-  planeManager: {fileID: 223974228}
-  pointCloudManager: {fileID: 0}
-  debugText: {fileID: 0}
-  mergeRadius: 0.15
-  minPlaneY: 0.3
-  coplanarYTol: 0.05
-  deltaThresholdMetres: 0.01
 --- !u!114 &223974235
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -629,9 +622,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3ae2fdc35424cb54ba50c5814d7abc55, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::EchoesLoadingScreenBootstrap
-  logoFlashSeconds: 0.5
-  lockLandscape: 1
-  uploadUrl: 
 --- !u!114 &223974238
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -649,6 +639,21 @@ MonoBehaviour:
   m_EnvironmentDepthMode: 3
   m_EnvironmentDepthTemporalSmoothing: 1
   m_OcclusionPreferenceMode: 0
+--- !u!114 &223974239
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 223974226}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6908d1f3e71a9314586f6a7d362f89e2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::EchoesBootstrap
+  logoFlashSeconds: 0.5
+  lockLandscape: 1
+  uploadUrl: 
 --- !u!1 &782628375
 GameObject:
   m_ObjectHideFlags: 0
