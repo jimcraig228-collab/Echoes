@@ -1,10 +1,35 @@
 // ============================================================
 //  EchoesScanHUD.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.6 | 26 June 2026
+//  Version: v2.4.8 | 27 June 2026
 //
-//  v2.4.6 — Guided Scan Overlay UI.
-//  Builds, on top of the existing HUD, the guided overlay:
+//  v2.4.8 — version-paired with the controller. No HUD logic change
+//  this version: the two field-test fixes (diagnostic overlay moved
+//  off the SET POSE button, light estimation requested) are both
+//  controller-side. The HUD button layout was already correct; the
+//  diagnostic box that was covering SET POSE is built by the
+//  controller, not here.
+//
+//  v2.4.7 — Test Instrumentation & Bug Fixes
+//  ----------------------------------------------------------
+//  FIX 2 (border-render) — EdgeBar() previously centred each
+//              thin bar on the screen edge with anchoredPosition
+//              zero, so the guided zone borders rendered as large
+//              slabs reaching toward mid-screen instead of thin
+//              bands hugging the edges. EdgeBar() now pins each
+//              bar flush inside its edge using pivot-aware
+//              anchoring, so all four borders (and the pose-gate
+//              frame, which shares the builder) sit as thin edge
+//              strips. No data change.
+//
+//  FREE-SCAN SUPPORT — GuidedOverlayRelay gains SetGuidedVisible(bool).
+//              In free-scan mode the controller hides the zone
+//              borders, arrows and instruction banner. The
+//              crosshair (and the controller's corner readout)
+//              stay visible.
+//
+//  ----------------------------------------------------------
+//  Inherited from v2.4.6 — Guided Scan Overlay UI:
 //    - Crosshair (static white dot, flashes on capture)
 //    - Four independent zone borders (per-edge addressable)
 //    - Four directional arrows (left/right/up/down)
@@ -12,11 +37,8 @@
 //    - Progress bar (time-based fill, swappable source later)
 //  All wired through GuidedOverlayRelay, injected into the
 //  controller the same one-frame-deferred way as the existing
-//  refs.
-//
-//  The original single-colour BorderColorRelay is retained for
-//  the pose-gate border behaviour. A NEW per-edge relay drives
-//  the guided zone borders independently (spec 4.2).
+//  refs. The original single-colour BorderColorRelay is retained
+//  for the pose-gate border behaviour.
 // ============================================================
 
 using System.Collections.Generic;
@@ -170,14 +192,36 @@ public class EchoesScanHUD : MonoBehaviour
         return go.GetComponent<RectTransform>();
     }
 
+    // v2.4.7 FIX 2: pin each bar flush inside its screen edge.
+    // Previously anchoredPosition was zero with a centre pivot, which
+    // centred the bar ON the edge line (half off-screen) and, on the
+    // stretched guided overlay, read as a slab reaching mid-screen.
+    // Now the pivot is set to the edge and the bar is nudged inward by
+    // half its thickness, so the full thin band sits on-screen against
+    // the edge. aMin/aMax already collapse the bar to a line along the
+    // correct edge; sizeDelta gives it its thickness on the free axis.
     private Image EdgeBar(string n, Transform p, Vector2 aMin, Vector2 aMax, float thickness, bool horizontal)
     {
         var i = NewImage(n, p, new Color(0.6f,0.6f,0.6f,0.4f));
         var rt = i.rectTransform;
         rt.anchorMin = aMin; rt.anchorMax = aMax;
-        if (horizontal) rt.sizeDelta = new Vector2(0, thickness);
-        else            rt.sizeDelta = new Vector2(thickness, 0);
-        rt.anchoredPosition = Vector2.zero;
+
+        if (horizontal)
+        {
+            // top edge: aMax.y == 1; bottom edge: aMax.y == 0
+            bool atTop = aMax.y >= 0.999f;
+            rt.pivot = new Vector2(0.5f, atTop ? 1f : 0f);
+            rt.sizeDelta = new Vector2(0f, thickness);
+            rt.anchoredPosition = new Vector2(0f, atTop ? -thickness * 0.5f : thickness * 0.5f);
+        }
+        else
+        {
+            // right edge: aMax.x == 1; left edge: aMax.x == 0
+            bool atRight = aMax.x >= 0.999f;
+            rt.pivot = new Vector2(atRight ? 1f : 0f, 0.5f);
+            rt.sizeDelta = new Vector2(thickness, 0f);
+            rt.anchoredPosition = new Vector2(atRight ? -thickness * 0.5f : thickness * 0.5f, 0f);
+        }
         return i;
     }
 
@@ -253,6 +297,35 @@ public class GuidedOverlayRelay : MonoBehaviour
     // track which borders are "complete" (stay green)
     private readonly HashSet<EchoesScanController.Zone> _complete = new HashSet<EchoesScanController.Zone>();
     private float _flashTimer = -1f;
+
+    // v2.4.7: when false (free-scan), guided elements are hidden and the
+    // per-zone setters become no-ops so nothing re-shows them mid-session.
+    private bool _guidedVisible = true;
+
+    // v2.4.7: show/hide the guided elements (borders, arrows, banner,
+    // progress bar). Crosshair is deliberately left alone — it stays
+    // visible in both modes.
+    public void SetGuidedVisible(bool visible)
+    {
+        _guidedVisible = visible;
+        SetActiveSafe(borderTop, visible); SetActiveSafe(borderBottom, visible);
+        SetActiveSafe(borderLeft, visible); SetActiveSafe(borderRight, visible);
+        SetActiveSafe(arrowLeft, visible); SetActiveSafe(arrowRight, visible);
+        SetActiveSafe(arrowUp, visible); SetActiveSafe(arrowDown, visible);
+        SetActiveSafe(banner, visible);
+        if (progressFill != null)
+        {
+            // hide the whole progress bar (fill + its track parent)
+            var track = progressFill.transform.parent;
+            if (track != null) track.gameObject.SetActive(visible);
+            else progressFill.gameObject.SetActive(visible);
+        }
+    }
+
+    private static void SetActiveSafe(Component c, bool active)
+    {
+        if (c != null) c.gameObject.SetActive(active);
+    }
 
     public void Init()
     {

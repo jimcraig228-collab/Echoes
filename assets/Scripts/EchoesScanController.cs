@@ -1,35 +1,36 @@
 // ============================================================
 //  EchoesScanController.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.6 | 26 June 2026
+//  Version: v2.4.8 | 27 June 2026
 //
-//  v2.4.6 — Guided Scan Overlay + Manifest Completion
+//  v2.4.8 — Field-Test Fixes (from v2.4.7 device test)
 //  ----------------------------------------------------------
-//  THREE PIECES, in dependency order:
+//  FIX A (diagnostic overlay overlap) — the bottom-right corner
+//              readout was sitting on top of the SET POSE button,
+//              making it untappable. The readout moves to the
+//              TOP-LEFT corner, clearing the whole bottom control
+//              bar for START/STOP and SET POSE.
 //
-//  PART ONE  — Manifest writer completed. WriteManifest() now
-//              serialises _stills, _planeLog, _cameraIntrinsics,
-//              _processingEvents, AND the new guided-scan block.
-//              The v2.4.5 skeleton (session_id/version/log only)
-//              is gone. Filename now sessionID_timestamp_v246.json
-//              so the version is visible before opening.
+//  FIX B (null light estimation) — ambient_intensity and
+//              color_temperature were null in every snapshot and
+//              every diagnostic sample. ARCore returns no light
+//              data unless the mode is explicitly requested on the
+//              ARCameraManager. Start() now sets
+//              requestedLightEstimation = AmbientIntensity |
+//              AmbientColor once the camera manager is found.
 //
-//  PART TWO  — Guided Scan Overlay. The free-paced steady-detect
-//              waypoint loop is REPLACED by a fixed, time-based
-//              four-zone state machine: Centre, Left, Right, Tilt
-//              (tilt = up). One still fired at the end of each
-//              zone dwell -> 4 stills (still_00..still_03).
-//              Drives crosshair / per-edge borders / arrows /
-//              instruction banner / progress bar via the HUD.
+//  ----------------------------------------------------------
+//  Inherited from v2.4.7:
+//  FIX 1 (session-merge) — InitSession() runs at the top of
+//              StartScan(); confirmed working in device test.
+//  FREE-SCAN MODE — freeScanMode toggle (default off).
+//  SCENARIO TAG — scenarioTag string, top-level in manifest.
+//  free_scan_mode written top-level alongside scenario_tag.
 //
-//  PART THREE— Continuous diagnostic log. A timed sampler (default
-//              500ms, configurable) writes a second file
-//              sessionID_timestamp_v246_diagnostic.json capturing
-//              everything ARCore exposes per sample.
-//
-//  Diagnostic on-screen overlay shrunk to a small bottom-right
-//  corner readout (half previous size) so the guided overlay owns
-//  the screen.
+//  Inherited from v2.4.6:
+//  PART ONE  — Full manifest writer.
+//  PART TWO  — Guided four-zone state machine (Centre/Left/Right/Tilt).
+//  PART THREE— Continuous diagnostic log (500ms sampler).
 //
 //  Pose gate unchanged from v2.4.5 (targetPitch -35 confirmed).
 // ============================================================
@@ -49,7 +50,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.6";
+    private const string VERSION = "v2.4.8";
 
     [HideInInspector] public BorderColorRelay   borderRelay;
     [HideInInspector] public TextMeshProUGUI    promptText;
@@ -81,9 +82,19 @@ public class EchoesScanController : MonoBehaviour
     [Tooltip("Continuous diagnostic sample interval (seconds). Configurable. Default 0.5s = 500ms.")]
     public float diagnosticSampleSeconds = 0.5f;
 
-    [Header("Steady Detection (legacy, retained for SetPose only)")]
+    [Header("Test Instrumentation (v2.4.7)")]
+    [Tooltip("Free-scan mode. Off = guided four-zone sequence (v2.4.6). On = operator-controlled scan, steady-detect stills, guided overlay hidden.")]
+    public bool freeScanMode = false;
+    [Tooltip("Scenario label written top-level into the manifest and diagnostic header (e.g. A, B, C). Set once per block of repeats. Empty serialises as an empty string.")]
+    public string scenarioTag = "";
+
+    [Header("Steady Detection (free-scan still capture, v2.4.7)")]
+    [Tooltip("Angular movement (deg) below which the phone counts as held steady.")]
     public float steadyAngularThreshold = 5f;
-    public float steadyHoldTime         = 1.5f;
+    [Tooltip("Seconds the phone must be held steady before a free-scan still fires.")]
+    public float steadyHoldTime = 1.5f;
+    [Tooltip("Minimum seconds between two free-scan steady-detect stills, so a long hold does not spam captures.")]
+    public float freeScanStillCooldown = 2.0f;
 
     public event Action<int, string>  OnStillCaptured;
     public event Action<PlaneEntry>   OnPlaneSnapshotReady;
@@ -103,6 +114,7 @@ public class EchoesScanController : MonoBehaviour
 
     private bool    _scanning        = false;
     private float   _steadyTimer     = 0f;
+    private float   _lastFreeStillTime = -999f;   // v2.4.7 free-scan still cooldown tracker
     private Vector3 _lastEuler       = Vector3.zero;
     private Vector3 _startPosition;
     private bool    _poseGatePassed  = false;
@@ -149,29 +161,31 @@ public class EchoesScanController : MonoBehaviour
         go.AddComponent<CanvasScaler>();
         go.AddComponent<GraphicRaycaster>();
 
-        // v2.4.6: small bottom-right corner readout (~quarter screen, half prior size).
+        // v2.4.8 FIX A: moved to TOP-LEFT (was bottom-right, where it sat on
+        // top of the SET POSE button and blocked the tap). Top-left band:
+        // x 0-38%, y 70-100%. Clears the entire bottom control bar.
         var bg = new GameObject("Bg", typeof(RectTransform), typeof(Image));
         bg.transform.SetParent(go.transform, false);
         var bgImg = bg.GetComponent<Image>();
         bgImg.color = new Color(0, 0, 0, 0.55f);
         bgImg.raycastTarget = false;
         var bgRt = bg.GetComponent<RectTransform>();
-        bgRt.anchorMin = new Vector2(0.62f, 0.0f);   // right ~38% wide
-        bgRt.anchorMax = new Vector2(1.0f, 0.30f);   // bottom ~30% tall
+        bgRt.anchorMin = new Vector2(0.0f, 0.70f);   // left ~38% wide
+        bgRt.anchorMax = new Vector2(0.38f, 1.0f);   // top ~30% tall
         bgRt.offsetMin = bgRt.offsetMax = Vector2.zero;
 
         var textGo = new GameObject("DiagText", typeof(RectTransform), typeof(TextMeshProUGUI));
         textGo.transform.SetParent(go.transform, false);
         var rt = textGo.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(0.62f, 0.0f);
-        rt.anchorMax = new Vector2(1.0f, 0.30f);
+        rt.anchorMin = new Vector2(0.0f, 0.70f);
+        rt.anchorMax = new Vector2(0.38f, 1.0f);
         rt.offsetMin = new Vector2(6, 4);
         rt.offsetMax = new Vector2(-6, -4);
 
         _diagText = textGo.GetComponent<TextMeshProUGUI>();
-        _diagText.fontSize = 12f;                    // half of prior 24
+        _diagText.fontSize = 12f;
         _diagText.color = new Color(1f, 1f, 1f, 0.85f);
-        _diagText.alignment = TextAlignmentOptions.BottomLeft;
+        _diagText.alignment = TextAlignmentOptions.TopLeft;
         _diagText.text = "diag…";
     }
 
@@ -228,7 +242,7 @@ public class EchoesScanController : MonoBehaviour
 
     private void Awake()
     {
-        Diag("Controller.Awake() FIRED v2.4.6");
+        Diag("Controller.Awake() FIRED v2.4.8");
     }
 
     private void OnEnable()
@@ -243,7 +257,7 @@ public class EchoesScanController : MonoBehaviour
 
     private void Start()
     {
-        Diag("Controller.Start() FIRED v2.4.6");
+        Diag("Controller.Start() FIRED v2.4.8");
 
         BuildDiagOverlay();
 
@@ -254,6 +268,17 @@ public class EchoesScanController : MonoBehaviour
         _debugManager      = FindObjectOfType<ARDebugManager>();
 
         Diag($"  ARCameraManager null={_cameraManager == null}  ARPlaneManager null={_planeManager == null}");
+
+        // v2.4.8 FIX B: ARCore returns no light data unless the mode is
+        // requested. Ask for ambient intensity + ambient colour so
+        // averageBrightness and averageColorTemperature populate in
+        // OnCameraFrame. Without this both stay null all session.
+        if (_cameraManager != null)
+        {
+            _cameraManager.requestedLightEstimation =
+                LightEstimation.AmbientIntensity | LightEstimation.AmbientColor;
+            Diag($"  Light estimation requested: {_cameraManager.requestedLightEstimation}");
+        }
 
         if (PlayerPrefs.HasKey("echoes_saved_pitch"))
         {
@@ -331,8 +356,50 @@ public class EchoesScanController : MonoBehaviour
             RecordDiagnosticSample();
         }
 
-        // Zone state machine (v2.4.6 Part Two)
-        TickZoneSequence();
+        if (freeScanMode)
+        {
+            // v2.4.7 free-scan: steady-detect still capture, no zone sequence
+            TickFreeScanSteady();
+        }
+        else
+        {
+            // Zone state machine (v2.4.6 Part Two)
+            TickZoneSequence();
+        }
+    }
+
+    // ----------------------------------------------------------
+    //  FREE-SCAN STEADY DETECT (v2.4.7)
+    //  Fires a still when the phone is held steady for steadyHoldTime,
+    //  rate-limited by freeScanStillCooldown. Replaces the guided
+    //  zone capture path when freeScanMode is on.
+    // ----------------------------------------------------------
+    private void TickFreeScanSteady()
+    {
+        if (Camera.main == null) return;
+
+        Vector3 euler = Camera.main.transform.eulerAngles;
+        float angular = HeadingDelta(euler.y, _lastEuler.y)
+                      + Mathf.Abs(Mathf.DeltaAngle(euler.x, _lastEuler.x));
+        _lastEuler = euler;
+
+        if (angular <= steadyAngularThreshold)
+        {
+            _steadyTimer += Time.deltaTime;
+            if (_steadyTimer >= steadyHoldTime
+                && (Time.time - _lastFreeStillTime) >= freeScanStillCooldown)
+            {
+                _lastFreeStillTime = Time.time;
+                _steadyTimer = 0f;
+                CaptureStillFreeScan();
+            }
+        }
+        else
+        {
+            _steadyTimer = 0f;
+        }
+
+        SetHud($"Free scan — {_stills.Count} stills  (hold steady to capture)");
     }
 
     // ----------------------------------------------------------
@@ -515,17 +582,44 @@ public class EchoesScanController : MonoBehaviour
     {
         if (!_poseGatePassed) { EvaluatePoseGate(); return; }
         if (Camera.main == null) return;
+
+        // --- v2.4.7 FIX 1: session-merge ---
+        // Re-initialise the session at the top of every START so back-to-back
+        // scans each get a fresh id/folder/filename and empty data lists.
+        // InitSession() clears _poseGatePassed, so capture and restore it —
+        // the gate has already passed by this point and must stay passed.
+        bool gateWasPassed = _poseGatePassed;
+        InitSession();
+        _poseGatePassed = gateWasPassed;
+
         _scanning = true; _sessionStartTime = Time.time;
         _startPosition = Camera.main.transform.position;
         _lastEuler = Camera.main.transform.eulerAngles; _steadyTimer = 0f;
+        _lastFreeStillTime = -999f;
         Vector3 euler = Camera.main.transform.eulerAngles;
         _startPitch = NormalisePitch(euler.x); _startHeight = Camera.main.transform.position.y; _startHeading = euler.y;
         CaptureCameraIntrinsics();
-        SetHud("Starting guided scan..."); SetBorder(ColGreen);
-        if (startStopLabel != null) startStopLabel.text = "STOP";
-        if (overlay != null) overlay.ResetForSession();
-        LogEvent("SCAN STARTED");
-        StartZoneSequence();
+
+        if (freeScanMode)
+        {
+            // --- v2.4.7 FREE-SCAN ---
+            // No zone state machine. Operator-controlled duration. Stills fire
+            // on steady-detect. Guided overlay hidden; crosshair stays.
+            SetHud("Free scan — hold steady to capture, STOP to end");
+            SetBorder(ColGreen);
+            if (startStopLabel != null) startStopLabel.text = "STOP";
+            if (overlay != null) { overlay.ResetForSession(); overlay.SetGuidedVisible(false); }
+            SetPrompt("FREE SCAN — move freely, hold steady for a still");
+            LogEvent("SCAN STARTED (free-scan)");
+        }
+        else
+        {
+            SetHud("Starting guided scan..."); SetBorder(ColGreen);
+            if (startStopLabel != null) startStopLabel.text = "STOP";
+            if (overlay != null) { overlay.SetGuidedVisible(true); overlay.ResetForSession(); }
+            LogEvent("SCAN STARTED");
+            StartZoneSequence();
+        }
     }
 
     private void StopScan()
@@ -537,7 +631,7 @@ public class EchoesScanController : MonoBehaviour
         uploader?.QueueSession(_sessionFolder, _sessionId);
         SetPrompt($"Session saved — {_stills.Count} stills"); SetHud(_sessionId); SetBorder(ColDim);
         if (startStopLabel != null) startStopLabel.text = "START";
-        if (overlay != null) overlay.ResetForSession();
+        if (overlay != null) { overlay.SetGuidedVisible(true); overlay.ResetForSession(); }
     }
 
     private void OnSetPosePressed() { Diag("OnSetPosePressed()"); SaveCurrentPose(); EvaluatePoseGate(); }
@@ -585,6 +679,25 @@ public class EchoesScanController : MonoBehaviour
         RecordPlaneSnapshot("still_sync", idx);
         LogProcessingEvent($"still_{idx}_captured", idx==0 ? new[]{"yolo_inference","scale_calibration","srl_query"} : new[]{"yolo_inference","mvs_partial_reconstruction"});
         if (overlay != null) overlay.FlashCapture();   // crosshair + active arrow white flash
+        OnStillCaptured?.Invoke(idx, filepath);
+    }
+
+    // v2.4.7: free-scan still — steady-detect triggered, tagged zone="free".
+    // Mirrors CaptureStillForZone minus the zone-record bookkeeping.
+    private void CaptureStillFreeScan()
+    {
+        if (Camera.main == null) return;
+        int idx = _stills.Count;
+        string filename = $"still_{idx:D2}_wp.png";
+        string filepath = Path.Combine(_sessionFolder, filename);
+        if (!TryCaptureImage(filepath)) { LogEvent("FREE STILL FAILED"); return; }
+        Vector3 pos = Camera.main.transform.position; Vector3 euler = Camera.main.transform.eulerAngles;
+        _stills.Add(new StillEntry { index=idx, file=filename, zone="free", pitch=NormalisePitch(euler.x), height=pos.y, heading=euler.y,
+            distance_to_start=Vector3.Distance(pos,_startPosition), timestamp=GetUnixTimestamp(), tracking=ARSession.state.ToString(), pose_matrix_4x4=GetCameraPoseMatrix() });
+        LogEvent($"FREE STILL {filename}");
+        RecordPlaneSnapshot("still_sync", idx);
+        LogProcessingEvent($"still_{idx}_captured", idx==0 ? new[]{"yolo_inference","scale_calibration","srl_query"} : new[]{"yolo_inference","mvs_partial_reconstruction"});
+        if (overlay != null) overlay.FlashCapture();
         OnStillCaptured?.Invoke(idx, filepath);
     }
 
@@ -701,6 +814,8 @@ public class EchoesScanController : MonoBehaviour
     {
         public string session_id;
         public string version;
+        public string scenario_tag;     // v2.4.7 — top-level, default empty string
+        public bool   free_scan_mode;   // v2.4.7 — top-level
         public double written_unix;
         public GuidedScanBlock guided_scan;
         public CameraIntrinsicsEntry camera_intrinsics;
@@ -719,10 +834,12 @@ public class EchoesScanController : MonoBehaviour
         {
             session_id = _sessionId,
             version = VERSION,
+            scenario_tag = scenarioTag ?? "",
+            free_scan_mode = freeScanMode,
             written_unix = GetUnixTimestamp(),
             guided_scan = new GuidedScanBlock
             {
-                guided_scan_mode = true,
+                guided_scan_mode = !freeScanMode,
                 zone_sequence = seq,
                 zone_duration_setting = zoneDurationSeconds,
                 tilt_up = tiltUp,
@@ -736,7 +853,7 @@ public class EchoesScanController : MonoBehaviour
         };
 
         string json = JsonUtility.ToJson(manifest, true);
-        string filename = $"{_sessionId}_{_sessionStamp}_v246.json";
+        string filename = $"{_sessionId}_{_sessionStamp}_v248.json";
         File.WriteAllText(Path.Combine(_sessionFolder, filename), json);
         Diag($"Manifest written: {filename}  stills={_stills.Count} planes={_planeLog.Count}");
     }
@@ -746,6 +863,8 @@ public class EchoesScanController : MonoBehaviour
     {
         public string session_id;
         public string version;
+        public string scenario_tag;     // v2.4.7 — pairs with the manifest
+        public bool   free_scan_mode;   // v2.4.7 — pairs with the manifest
         public float  sample_interval_seconds;
         public List<DiagnosticSample> samples = new List<DiagnosticSample>();
     }
@@ -756,11 +875,13 @@ public class EchoesScanController : MonoBehaviour
         {
             session_id = _sessionId,
             version = VERSION,
+            scenario_tag = scenarioTag ?? "",
+            free_scan_mode = freeScanMode,
             sample_interval_seconds = diagnosticSampleSeconds,
             samples = _diagSamples
         };
         string json = JsonUtility.ToJson(df, true);
-        string filename = $"{_sessionId}_{_sessionStamp}_v246_diagnostic.json";
+        string filename = $"{_sessionId}_{_sessionStamp}_v248_diagnostic.json";
         _diagnosticPath = Path.Combine(_sessionFolder, filename);
         File.WriteAllText(_diagnosticPath, json);
         Diag($"Diagnostic log written: {filename}  samples={_diagSamples.Count}");
