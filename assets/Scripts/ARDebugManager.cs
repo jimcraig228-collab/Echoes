@@ -7,7 +7,7 @@ using TMPro;
 // ============================================================
 //  ARDebugManager.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: 2.3.4  |  16 June 2026  [BUILD MARKER 2 - static state + foreach fixes]
+//  Version: 2.4.9  |  01 July 2026  [vertical dedup + immature-plane filter]
 //
 //  CHANGELOG v2.3.4:
 //  Fixes in this version:
@@ -132,6 +132,10 @@ public class ARDebugManager : MonoBehaviour
     //  Also filters ghost planes below minPlaneY.
 
     private List<ARPlane> GetDeduplicatedPlanes()
+        => GetDeduplicatedHorizontal();
+
+    // v2.4.9: horizontal dedup, now also skipping immature (zero-size) planes.
+    private List<ARPlane> GetDeduplicatedHorizontal()
     {
         var all     = new List<ARPlane>();
         var keepers = new List<ARPlane>();
@@ -142,21 +146,21 @@ public class ARDebugManager : MonoBehaviour
 
         foreach (var candidate in all)
         {
+            // Filter 0 (v2.4.9): skip planes whose boundary has not matured.
+            if (candidate.size.x <= 0.0001f || candidate.size.y <= 0.0001f)
+                continue;
             // Filter 1: ghost planes below physical floor threshold
             if (candidate.center.y < minPlaneY)
                 continue;
 
             bool isDuplicate = false;
-
             for (int k = 0; k < keepers.Count; k++)
             {
                 float dist  = Vector3.Distance(candidate.center, keepers[k].center);
                 float yDiff = Mathf.Abs(candidate.center.y - keepers[k].center.y);
-
                 if (dist < mergeRadius && yDiff < coplanarYTol)
                 {
                     isDuplicate = true;
-                    // Keep the larger plane as the surface representative
                     float areaCandidate = candidate.size.x * candidate.size.y;
                     float areaKeeper    = keepers[k].size.x * keepers[k].size.y;
                     if (areaCandidate > areaKeeper)
@@ -164,11 +168,47 @@ public class ARDebugManager : MonoBehaviour
                     break;
                 }
             }
-
             if (!isDuplicate)
                 keepers.Add(candidate);
         }
+        return keepers;
+    }
 
+    // v2.4.9: vertical dedup. Walls merge by horizontal proximity of centre and
+    // shared normal direction, rather than by Y height. Immature planes skipped.
+    private List<ARPlane> GetDeduplicatedVertical()
+    {
+        var all     = new List<ARPlane>();
+        var keepers = new List<ARPlane>();
+
+        foreach (var p in planeManager.trackables)
+            if (p.alignment == PlaneAlignment.Vertical)
+                all.Add(p);
+
+        foreach (var candidate in all)
+        {
+            if (candidate.size.x <= 0.0001f || candidate.size.y <= 0.0001f)
+                continue;
+
+            bool isDuplicate = false;
+            for (int k = 0; k < keepers.Count; k++)
+            {
+                float dist   = Vector3.Distance(candidate.center, keepers[k].center);
+                // Same wall = centres close AND normals near-parallel.
+                float normDot = Mathf.Abs(Vector3.Dot(candidate.normal, keepers[k].normal));
+                if (dist < mergeRadius && normDot > 0.94f) // ~20 deg
+                {
+                    isDuplicate = true;
+                    float areaCandidate = candidate.size.x * candidate.size.y;
+                    float areaKeeper    = keepers[k].size.x * keepers[k].size.y;
+                    if (areaCandidate > areaKeeper)
+                        keepers[k] = candidate;
+                    break;
+                }
+            }
+            if (!isDuplicate)
+                keepers.Add(candidate);
+        }
         return keepers;
     }
 
@@ -234,5 +274,9 @@ public class ARDebugManager : MonoBehaviour
     //  Call this instead of counting planeManager.trackables
 
     public int GetRealHorizontalPlaneCount()
-        => GetDeduplicatedPlanes().Count;
+        => GetDeduplicatedHorizontal().Count;
+
+    // v2.4.9: real (deduped, matured) vertical surface count for wall detection.
+    public int GetRealVerticalPlaneCount()
+        => GetDeduplicatedVertical().Count;
 }

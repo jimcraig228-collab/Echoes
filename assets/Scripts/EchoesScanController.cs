@@ -1,8 +1,30 @@
 // ============================================================
 //  EchoesScanController.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.8 | 27 June 2026
+//  Version: v2.4.9 | 01 July 2026
 //
+//  v2.4.9 — Sensor Enablement Fixes (from v2.4.8 office+living-room data)
+//  ----------------------------------------------------------
+//  FIX V (vertical planes never detected) — three scans across two
+//              rooms returned ZERO vertical planes despite walls in
+//              frame. Root cause: requestedPlaneDetectionMode was
+//              never set in code, so detection ran at whatever the
+//              Inspector defaulted to (Horizontal only). Start() now
+//              sets Horizontal | Vertical explicitly and logs it, so
+//              walls are actually detected and the setting is
+//              version-controlled, not silently Inspector-driven.
+//
+//  FIX D (plane dimensions reading 0.0) — living-room scans reported
+//              many planes with size 0.0 x 0.0. ARCore returns size 0
+//              for a plane whose boundary has not yet matured. The
+//              snapshot now flags immature (zero-size) planes and the
+//              dedup ignores them, so counts reflect real surfaces.
+//
+//  FIX G (granted light mode logging) — log currentLightEstimation
+//              (granted) alongside requested, so a null colour
+//              temperature is explained as platform vs code.
+//
+//  ----------------------------------------------------------
 //  v2.4.8 — Field-Test Fixes (from v2.4.7 device test)
 //  ----------------------------------------------------------
 //  FIX A (diagnostic overlay overlap) — the bottom-right corner
@@ -50,7 +72,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.8";
+    private const string VERSION = "v2.4.9";
 
     [HideInInspector] public BorderColorRelay   borderRelay;
     [HideInInspector] public TextMeshProUGUI    promptText;
@@ -203,11 +225,11 @@ public class EchoesScanController : MonoBehaviour
     }
     [Serializable] public class PlaneDetail
     {
-        public string id, type, classification; public float width, height;
+        public string id, type, classification; public float width, height; public bool immature;
     }
     [Serializable] public class PlaneEntry
     {
-        public double timestamp; public int raw_plane_ids, surfaces, synced_still;
+        public double timestamp; public int raw_plane_ids, surfaces, vertical_surfaces, synced_still;
         public string reason, tracking;
         public int horizontal_planes, vertical_planes, feature_point_count;
         public float? ambient_intensity, color_temperature; public bool depth_available;
@@ -278,6 +300,20 @@ public class EchoesScanController : MonoBehaviour
             _cameraManager.requestedLightEstimation =
                 LightEstimation.AmbientIntensity | LightEstimation.AmbientColor;
             Diag($"  Light estimation requested: {_cameraManager.requestedLightEstimation}");
+            // v2.4.9 FIX G: log what the subsystem GRANTED, not just what we asked.
+            // A null colour temperature is then explained (platform limit vs code bug).
+            Diag($"  Light estimation GRANTED:  {_cameraManager.currentLightEstimation}");
+        }
+
+        // v2.4.9 FIX V: explicitly enable vertical plane detection. Without this,
+        // detection defaults to whatever the Inspector holds (was Horizontal-only),
+        // so walls were never detected. Set in code so it is version-controlled.
+        if (_planeManager != null)
+        {
+            _planeManager.requestedDetectionMode =
+                PlaneDetectionMode.Horizontal | PlaneDetectionMode.Vertical;
+            Diag($"  Plane detection mode requested: {_planeManager.requestedDetectionMode}");
+            Diag($"  Plane detection mode current:   {_planeManager.currentDetectionMode}");
         }
 
         if (PlayerPrefs.HasKey("echoes_saved_pitch"))
@@ -732,11 +768,15 @@ public class EchoesScanController : MonoBehaviour
                     case PlaneAlignment.Vertical:       t="Vertical";       vert++; break;
                     default:                            t="NotAxisAligned"; break;
                 }
-                details.Add(new PlaneDetail { id=plane.trackableId.ToString(), type=t, classification=plane.classifications.ToString(), width=plane.size.x, height=plane.size.y });
+                // v2.4.9 FIX D: a plane whose boundary has not matured reports size 0.
+                // Tag it so downstream can distinguish "immature" from a real 0-size error.
+                bool immature = (plane.size.x <= 0.0001f || plane.size.y <= 0.0001f);
+                details.Add(new PlaneDetail { id=plane.trackableId.ToString(), type=t, classification=plane.classifications.ToString(), width=plane.size.x, height=plane.size.y, immature=immature });
             }
         }
-        int deduped = _debugManager != null ? _debugManager.GetRealHorizontalPlaneCount() : horz;
-        var entry = new PlaneEntry { timestamp=GetUnixTimestamp(), raw_plane_ids=raw, surfaces=deduped, synced_still=syncedStill, reason=reason, tracking=ARSession.state.ToString(),
+        int deduped     = _debugManager != null ? _debugManager.GetRealHorizontalPlaneCount() : horz;
+        int dedupedVert = _debugManager != null ? _debugManager.GetRealVerticalPlaneCount()   : vert;
+        var entry = new PlaneEntry { timestamp=GetUnixTimestamp(), raw_plane_ids=raw, surfaces=deduped, vertical_surfaces=dedupedVert, synced_still=syncedStill, reason=reason, tracking=ARSession.state.ToString(),
             horizontal_planes=horz, vertical_planes=vert, feature_point_count=GetFeaturePointCount(), ambient_intensity=_ambientIntensity, color_temperature=_colorTemperature, depth_available=CheckDepthAvailable(), plane_details=details };
         _planeLog.Add(entry); return entry;
     }
