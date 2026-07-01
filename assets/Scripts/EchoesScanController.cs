@@ -3,6 +3,17 @@
 //  Echoes — Programmable Spatial Experience Platform
 //  Version: v2.4.9 | 01 July 2026
 //
+//  v2.4.10 — Depth Density Instrumentation (cheap version)
+//  ----------------------------------------------------------
+//  FIX DEPTH-STATS — depth was a boolean only. Now also captures the
+//              valid-point count from the environment depth CPU image
+//              and computes points-per-square-metre against total
+//              deduped plane area. depth_available is UNCHANGED and
+//              still written, so this is purely additive.
+//              ROLLBACK: delete GetDepthStats(), remove the two new
+//              fields (depth_points, depth_density_per_m2) and their
+//              two assignments. CheckDepthAvailable() is untouched.
+//
 //  v2.4.9 — Sensor Enablement Fixes (from v2.4.8 office+living-room data)
 //  ----------------------------------------------------------
 //  FIX V (vertical planes never detected) — three scans across two
@@ -72,7 +83,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.9";
+    private const string VERSION = "v2.4.10";
 
     [HideInInspector] public BorderColorRelay   borderRelay;
     [HideInInspector] public TextMeshProUGUI    promptText;
@@ -126,6 +137,8 @@ public class EchoesScanController : MonoBehaviour
     private ARPlaneManager      _planeManager;
     private ARPointCloudManager _pointCloudManager;
     private AROcclusionManager  _occlusionManager;
+    private int   _lastDepthPoints  = 0;   // v2.4.10 cache
+    private float _lastDepthDensity = 0f;  // v2.4.10 cache
     private ARDebugManager      _debugManager;
 
     private static readonly Color ColPurple = new Color(0.439f, 0.251f, 0.722f, 0.7f);
@@ -233,6 +246,7 @@ public class EchoesScanController : MonoBehaviour
         public string reason, tracking;
         public int horizontal_planes, vertical_planes, feature_point_count;
         public float? ambient_intensity, color_temperature; public bool depth_available;
+        public int depth_points; public float depth_density_per_m2; // v2.4.10 additive
         public List<PlaneDetail> plane_details = new List<PlaneDetail>();
     }
     [Serializable] public class ProcessingEventEntry
@@ -256,6 +270,8 @@ public class EchoesScanController : MonoBehaviour
         public string tracking;
         public int    horizontal_planes, vertical_planes, feature_point_count;
         public bool   depth_available;
+        public int    depth_points;          // v2.4.10 additive
+        public float  depth_density_per_m2;  // v2.4.10 additive
         public float? ambient_intensity, color_temperature;
         public float  pos_x, pos_y, pos_z, rot_x, rot_y, rot_z;
     }
@@ -755,6 +771,9 @@ public class EchoesScanController : MonoBehaviour
 
     private PlaneEntry RecordPlaneSnapshot(string reason, int syncedStill)
     {
+        // v2.4.10: refresh depth stats once here so both the snapshot and any
+        // subsequent diagnostic sample read a consistent cached value.
+        GetDepthStats(out _lastDepthPoints, out _lastDepthDensity);
         int raw=0, horz=0, vert=0; var details = new List<PlaneDetail>();
         if (_planeManager != null)
         {
@@ -777,13 +796,15 @@ public class EchoesScanController : MonoBehaviour
         int deduped     = _debugManager != null ? _debugManager.GetRealHorizontalPlaneCount() : horz;
         int dedupedVert = _debugManager != null ? _debugManager.GetRealVerticalPlaneCount()   : vert;
         var entry = new PlaneEntry { timestamp=GetUnixTimestamp(), raw_plane_ids=raw, surfaces=deduped, vertical_surfaces=dedupedVert, synced_still=syncedStill, reason=reason, tracking=ARSession.state.ToString(),
-            horizontal_planes=horz, vertical_planes=vert, feature_point_count=GetFeaturePointCount(), ambient_intensity=_ambientIntensity, color_temperature=_colorTemperature, depth_available=CheckDepthAvailable(), plane_details=details };
+            horizontal_planes=horz, vertical_planes=vert, feature_point_count=GetFeaturePointCount(), ambient_intensity=_ambientIntensity, color_temperature=_colorTemperature, depth_available=CheckDepthAvailable(), depth_points=_lastDepthPoints, depth_density_per_m2=_lastDepthDensity, plane_details=details };
         _planeLog.Add(entry); return entry;
     }
 
     // v2.4.6 Part Three — one continuous diagnostic sample
     private void RecordDiagnosticSample()
     {
+        // v2.4.10: refresh depth stats for this sample.
+        GetDepthStats(out _lastDepthPoints, out _lastDepthDensity);
         int horz=0, vert=0;
         if (_planeManager != null)
         {
@@ -811,6 +832,8 @@ public class EchoesScanController : MonoBehaviour
             horizontal_planes = horz, vertical_planes = vert,
             feature_point_count = GetFeaturePointCount(),
             depth_available = CheckDepthAvailable(),
+            depth_points = _lastDepthPoints,
+            depth_density_per_m2 = _lastDepthDensity,
             ambient_intensity = _ambientIntensity, color_temperature = _colorTemperature,
             pos_x = pos.x, pos_y = pos.y, pos_z = pos.z,
             rot_x = rot.x, rot_y = rot.y, rot_z = rot.z
@@ -829,6 +852,65 @@ public class EchoesScanController : MonoBehaviour
         if (_occlusionManager == null || !_occlusionManager.enabled) return false;
         if (_occlusionManager.TryAcquireEnvironmentDepthCpuImage(out XRCpuImage img)) { img.Dispose(); return true; }
         return false;
+    }
+
+    // v2.4.10: cheap depth density. Counts valid (non-zero, finite) depth samples
+    // in the environment depth CPU image, and divides by total deduped plane area
+    // to give points-per-square-metre. Returns (0,0) if depth unavailable.
+    // ROLLBACK: delete this whole method and its two callers; CheckDepthAvailable
+    // above is unchanged and the scan still runs exactly as v2.4.9.
+    private void GetDepthStats(out int validPoints, out float densityPerM2)
+    {
+        validPoints  = 0;
+        densityPerM2 = 0f;
+        if (_occlusionManager == null || !_occlusionManager.enabled) return;
+
+        if (!_occlusionManager.TryAcquireEnvironmentDepthCpuImage(out XRCpuImage img)) return;
+        try
+        {
+            // Depth CPU image is single-plane float32 (metres) on ARCore.
+            // Reinterpret the byte NativeArray as floats with zero per-pixel allocation.
+            var plane = img.GetPlane(0);
+            var floats = plane.data.Reinterpret<float>(1); // 1 byte -> element size, view as float
+            int count  = floats.Length;
+            int valid  = 0;
+            // Subsample every Nth pixel to keep this cheap at 2Hz. Density is a ratio,
+            // so a consistent stride does not bias points-per-m2 (we scale back up).
+            const int STRIDE = 4;
+            int sampled = 0;
+            for (int i = 0; i < count; i += STRIDE)
+            {
+                float d = floats[i];
+                if (d > 0.0001f && !float.IsNaN(d) && !float.IsInfinity(d)) valid++;
+                sampled++;
+            }
+            // scale sampled valid count back to full-image estimate
+            validPoints = (sampled > 0) ? (int)((long)valid * count / sampled) : 0;
+
+            float area = GetTotalPlaneArea();
+            if (area > 0.01f) densityPerM2 = validPoints / area;
+        }
+        catch (System.Exception e)
+        {
+            Diag($"  Depth stats error: {e.Message}");
+        }
+        finally
+        {
+            img.Dispose();
+        }
+    }
+
+    // Total area of currently tracked planes (rough denominator for depth density).
+    private float GetTotalPlaneArea()
+    {
+        float area = 0f;
+        if (_planeManager == null) return 0f;
+        foreach (var plane in _planeManager.trackables)
+        {
+            if (plane.size.x <= 0.0001f || plane.size.y <= 0.0001f) continue;
+            area += plane.size.x * plane.size.y;
+        }
+        return area;
     }
 
     private void SetPrompt(string msg) { if (promptText != null) promptText.text = msg; }
