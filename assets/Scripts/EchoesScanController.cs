@@ -3,6 +3,27 @@
 //  Echoes — Programmable Spatial Experience Platform
 //  Version: v2.4.9 | 01 July 2026
 //
+//  v2.4.11 — Count Consistency + Light Observability (test build)
+//  ----------------------------------------------------------
+//  FIX COUNT — surfaces (deduped) and plane_details came from two
+//              separate walks of planeManager.trackables (one here,
+//              one inside ARDebugManager). Between the two reads the
+//              plane set could change, so surfaces disagreed with the
+//              details list (e.g. surfaces=12 while 12 of 16 details
+//              were immature). Now the matured surface count is derived
+//              from the SAME single walk that builds the details, using
+//              the immature flag already computed. surfaces and
+//              plane_details can no longer disagree.
+//              matured_surfaces / matured_vertical are the new honest
+//              counts; the old deduped values are kept for continuity.
+//
+//  FIX LIGHT-OBS — OnCameraFrame latched light values silently, so a
+//              null was indistinguishable from "handler never fired".
+//              Now counts frames received and whether any light value
+//              was ever seen, surfaced in the diagnostic, so the next
+//              scan tells us definitively if ARCore delivers light data
+//              on this device. Cheap observability, no behaviour change.
+//
 //  v2.4.10 — Depth Density Instrumentation (cheap version)
 //  ----------------------------------------------------------
 //  FIX DEPTH-STATS — depth was a boolean only. Now also captures the
@@ -83,24 +104,24 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.10";
+    private const string VERSION = "v2.4.11";
 
-    [HideInInspector] public BorderColorRelay   borderRelay;
-    [HideInInspector] public TextMeshProUGUI    promptText;
-    [HideInInspector] public TextMeshProUGUI    hudText;
-    [HideInInspector] public Button             startStopButton;
-    [HideInInspector] public TextMeshProUGUI    startStopLabel;
-    [HideInInspector] public Button             setPoseButton;
+    [HideInInspector] public BorderColorRelay borderRelay;
+    [HideInInspector] public TextMeshProUGUI promptText;
+    [HideInInspector] public TextMeshProUGUI hudText;
+    [HideInInspector] public Button startStopButton;
+    [HideInInspector] public TextMeshProUGUI startStopLabel;
+    [HideInInspector] public Button setPoseButton;
 
     // --- Guided overlay refs (injected by HUD, v2.4.6) ---
     [HideInInspector] public GuidedOverlayRelay overlay;
 
     [Header("Pose Gate")]
-    public bool  gateOnPitch    = true;
-    public bool  gateOnHeight   = false;
-    public bool  gateOnDistance = false;
-    public bool  gateOnHeading  = false;
-    public float targetPitch       = -35f;
+    public bool gateOnPitch = true;
+    public bool gateOnHeight = false;
+    public bool gateOnDistance = false;
+    public bool gateOnHeading = false;
+    public float targetPitch = -35f;
     public float pitchToleranceDeg = 8f;
 
     [Header("Guided Scan — Zone Sequence (v2.4.6)")]
@@ -129,52 +150,54 @@ public class EchoesScanController : MonoBehaviour
     [Tooltip("Minimum seconds between two free-scan steady-detect stills, so a long hold does not spam captures.")]
     public float freeScanStillCooldown = 2.0f;
 
-    public event Action<int, string>  OnStillCaptured;
-    public event Action<PlaneEntry>   OnPlaneSnapshotReady;
-    public event Action<string>       OnScanComplete;
+    public event Action<int, string> OnStillCaptured;
+    public event Action<PlaneEntry> OnPlaneSnapshotReady;
+    public event Action<string> OnScanComplete;
 
-    private ARCameraManager     _cameraManager;
-    private ARPlaneManager      _planeManager;
+    private ARCameraManager _cameraManager;
+    private ARPlaneManager _planeManager;
     private ARPointCloudManager _pointCloudManager;
-    private AROcclusionManager  _occlusionManager;
-    private int   _lastDepthPoints  = 0;   // v2.4.10 cache
+    private AROcclusionManager _occlusionManager;
+    private int _lastDepthPoints = 0;   // v2.4.10 cache
     private float _lastDepthDensity = 0f;  // v2.4.10 cache
-    private ARDebugManager      _debugManager;
+    private ARDebugManager _debugManager;
 
     private static readonly Color ColPurple = new Color(0.439f, 0.251f, 0.722f, 0.7f);
-    private static readonly Color ColGreen  = new Color(0.200f, 0.800f, 0.400f, 0.7f);
-    private static readonly Color ColAmber  = new Color(0.900f, 0.600f, 0.100f, 0.7f);
-    private static readonly Color ColDim    = new Color(0.400f, 0.400f, 0.400f, 0.4f);
-    private static readonly Color ColWhite  = new Color(1f, 1f, 1f, 0.85f);
+    private static readonly Color ColGreen = new Color(0.200f, 0.800f, 0.400f, 0.7f);
+    private static readonly Color ColAmber = new Color(0.900f, 0.600f, 0.100f, 0.7f);
+    private static readonly Color ColDim = new Color(0.400f, 0.400f, 0.400f, 0.4f);
+    private static readonly Color ColWhite = new Color(1f, 1f, 1f, 0.85f);
 
-    private bool    _scanning        = false;
-    private float   _steadyTimer     = 0f;
-    private float   _lastFreeStillTime = -999f;   // v2.4.7 free-scan still cooldown tracker
-    private Vector3 _lastEuler       = Vector3.zero;
+    private bool _scanning = false;
+    private float _steadyTimer = 0f;
+    private float _lastFreeStillTime = -999f;   // v2.4.7 free-scan still cooldown tracker
+    private Vector3 _lastEuler = Vector3.zero;
     private Vector3 _startPosition;
-    private bool    _poseGatePassed  = false;
-    private float   _sessionStartTime;
-    private float   _savedPitch, _savedHeight, _savedHeading;
-    private bool    _hasSavedPose = false;
-    private float?  _ambientIntensity = null;
-    private float?  _colorTemperature = null;
-    private string  _sessionId, _sessionFolder, _sessionStamp;
-    private CameraIntrinsicsEntry      _cameraIntrinsics;
-    private List<StillEntry>           _stills           = new List<StillEntry>();
-    private List<PlaneEntry>           _planeLog         = new List<PlaneEntry>();
+    private bool _poseGatePassed = false;
+    private float _sessionStartTime;
+    private float _savedPitch, _savedHeight, _savedHeading;
+    private bool _hasSavedPose = false;
+    private float? _ambientIntensity = null;
+    private float? _colorTemperature = null;
+    private int _lightFrameCount = 0;      // v2.4.11: frames OnCameraFrame saw
+    private bool _lightEverSeen = false;  // v2.4.11: any light value ever delivered
+    private string _sessionId, _sessionFolder, _sessionStamp;
+    private CameraIntrinsicsEntry _cameraIntrinsics;
+    private List<StillEntry> _stills = new List<StillEntry>();
+    private List<PlaneEntry> _planeLog = new List<PlaneEntry>();
     private List<ProcessingEventEntry> _processingEvents = new List<ProcessingEventEntry>();
-    private List<string>               _log              = new List<string>();
+    private List<string> _log = new List<string>();
     private float _startPitch, _startHeight, _startHeading;
-    private int   _lastRawPlaneCount = -1;
+    private int _lastRawPlaneCount = -1;
 
     // --- Zone state machine (v2.4.6) ---
     public enum Zone { Centre, Left, Right, Tilt }
     private static readonly Zone[] ZONE_ORDER = { Zone.Centre, Zone.Left, Zone.Right, Zone.Tilt };
-    private int    _zoneIndex      = -1;       // -1 before sequence start
-    private float  _zoneTimer      = 0f;
-    private bool   _inTransition   = false;
-    private float  _transitionTimer = 0f;
-    private bool   _stillFiredThisZone = false;
+    private int _zoneIndex = -1;       // -1 before sequence start
+    private float _zoneTimer = 0f;
+    private bool _inTransition = false;
+    private float _transitionTimer = 0f;
+    private bool _stillFiredThisZone = false;
     private string _instructionState = "idle"; // idle | active | transitioning | complete
     private List<ZoneRecord> _zoneRecords = new List<ZoneRecord>();
 
@@ -225,55 +248,66 @@ public class EchoesScanController : MonoBehaviour
     }
 
     // --- Data classes ---
-    [Serializable] public class CameraIntrinsicsEntry
+    [Serializable]
+    public class CameraIntrinsicsEntry
     {
         public float focal_length_x, focal_length_y, principal_point_x, principal_point_y;
-        public int   image_width, image_height;
+        public int image_width, image_height;
     }
-    [Serializable] public class StillEntry
+    [Serializable]
+    public class StillEntry
     {
         public int index; public string file, tracking, zone;
         public float pitch, height, heading, distance_to_start;
         public double timestamp; public float[] pose_matrix_4x4;
     }
-    [Serializable] public class PlaneDetail
+    [Serializable]
+    public class PlaneDetail
     {
         public string id, type, classification; public float width, height; public bool immature;
     }
-    [Serializable] public class PlaneEntry
+    [Serializable]
+    public class PlaneEntry
     {
         public double timestamp; public int raw_plane_ids, surfaces, vertical_surfaces, synced_still;
         public string reason, tracking;
         public int horizontal_planes, vertical_planes, feature_point_count;
+        public int matured_surfaces, matured_vertical;   // v2.4.11 honest counts
+        public int light_frames; public bool light_seen; // v2.4.11 light observability
         public float? ambient_intensity, color_temperature; public bool depth_available;
         public int depth_points; public float depth_density_per_m2; // v2.4.10 additive
         public List<PlaneDetail> plane_details = new List<PlaneDetail>();
     }
-    [Serializable] public class ProcessingEventEntry
+    [Serializable]
+    public class ProcessingEventEntry
     {
         public double timestamp; public string trigger; public string[] hooks_available; public float elapsed_ms;
     }
     // v2.4.6 — per-zone record for the guided-scan manifest block
-    [Serializable] public class ZoneRecord
+    [Serializable]
+    public class ZoneRecord
     {
         public string zone;
         public double start_timestamp, end_timestamp, still_timestamp;
-        public bool   still_confirmed;
+        public bool still_confirmed;
         public string instruction_state_at_still;
     }
     // v2.4.6 — one continuous diagnostic sample
-    [Serializable] public class DiagnosticSample
+    [Serializable]
+    public class DiagnosticSample
     {
         public double timestamp_unix_ms;
         public string current_zone, instruction_state;
-        public float  zone_elapsed_ms;
+        public float zone_elapsed_ms;
         public string tracking;
-        public int    horizontal_planes, vertical_planes, feature_point_count;
-        public bool   depth_available;
-        public int    depth_points;          // v2.4.10 additive
-        public float  depth_density_per_m2;  // v2.4.10 additive
+        public int horizontal_planes, vertical_planes, feature_point_count;
+        public bool depth_available;
+        public int depth_points;          // v2.4.10 additive
+        public float depth_density_per_m2;  // v2.4.10 additive
+        public int matured_surfaces, matured_vertical; // v2.4.11
+        public int light_frames; public bool light_seen; // v2.4.11
         public float? ambient_intensity, color_temperature;
-        public float  pos_x, pos_y, pos_z, rot_x, rot_y, rot_z;
+        public float pos_x, pos_y, pos_z, rot_x, rot_y, rot_z;
     }
 
     // --- Lifecycle ---
@@ -299,11 +333,11 @@ public class EchoesScanController : MonoBehaviour
 
         BuildDiagOverlay();
 
-        _cameraManager     = FindObjectOfType<ARCameraManager>();
-        _planeManager      = FindObjectOfType<ARPlaneManager>();
+        _cameraManager = FindObjectOfType<ARCameraManager>();
+        _planeManager = FindObjectOfType<ARPlaneManager>();
         _pointCloudManager = FindObjectOfType<ARPointCloudManager>();
-        _occlusionManager  = FindObjectOfType<AROcclusionManager>();
-        _debugManager      = FindObjectOfType<ARDebugManager>();
+        _occlusionManager = FindObjectOfType<AROcclusionManager>();
+        _debugManager = FindObjectOfType<ARDebugManager>();
 
         Diag($"  ARCameraManager null={_cameraManager == null}  ARPlaneManager null={_planeManager == null}");
 
@@ -378,8 +412,8 @@ public class EchoesScanController : MonoBehaviour
         {
             var sb = new StringBuilder();
             sb.AppendLine($"ECHOES {VERSION}");
-            sb.AppendLine($"scan:{_scanning} zone:{(_zoneIndex>=0 && _zoneIndex<ZONE_ORDER.Length ? ZONE_ORDER[_zoneIndex].ToString() : "-")}");
-            sb.AppendLine($"btn:{(startStopButton!=null?"OK":"NULL")} planes:{_lastRawPlaneCount}");
+            sb.AppendLine($"scan:{_scanning} zone:{(_zoneIndex >= 0 && _zoneIndex < ZONE_ORDER.Length ? ZONE_ORDER[_zoneIndex].ToString() : "-")}");
+            sb.AppendLine($"btn:{(startStopButton != null ? "OK" : "NULL")} planes:{_lastRawPlaneCount}");
             _diagText.text = sb.ToString();
         }
 
@@ -522,7 +556,8 @@ public class EchoesScanController : MonoBehaviour
         Zone z = ZONE_ORDER[_zoneIndex];
         _instructionState = "active";
 
-        var rec = new ZoneRecord {
+        var rec = new ZoneRecord
+        {
             zone = z.ToString(),
             start_timestamp = GetUnixTimestamp(),
             still_confirmed = false
@@ -554,11 +589,12 @@ public class EchoesScanController : MonoBehaviour
         switch (z)
         {
             case Zone.Centre: return "CENTRE — hold still on the reference object";
-            case Zone.Left:   return "LEFT — sweep left, keep crosshair on reference";
-            case Zone.Right:  return "RIGHT — sweep right, keep crosshair on reference";
-            case Zone.Tilt:   return tiltUp ? "TILT UP — lift toward the far wall"
+            case Zone.Left: return "LEFT — sweep left, keep crosshair on reference";
+            case Zone.Right: return "RIGHT — sweep right, keep crosshair on reference";
+            case Zone.Tilt:
+                return tiltUp ? "TILT UP — lift toward the far wall"
                                             : "TILT DOWN — lower toward the floor";
-            default:          return z.ToString();
+            default: return z.ToString();
         }
     }
 
@@ -575,9 +611,10 @@ public class EchoesScanController : MonoBehaviour
 
     private void OnCameraFrame(ARCameraFrameEventArgs args)
     {
+        _lightFrameCount++;   // v2.4.11: prove the handler is firing at all
         var le = args.lightEstimation;
-        if (le.averageBrightness.HasValue)       _ambientIntensity = le.averageBrightness.Value;
-        if (le.averageColorTemperature.HasValue) _colorTemperature = le.averageColorTemperature.Value;
+        if (le.averageBrightness.HasValue) { _ambientIntensity = le.averageBrightness.Value; _lightEverSeen = true; }
+        if (le.averageColorTemperature.HasValue) { _colorTemperature = le.averageColorTemperature.Value; _lightEverSeen = true; }
     }
 
     private void InitSession()
@@ -695,9 +732,12 @@ public class EchoesScanController : MonoBehaviour
         {
             _cameraIntrinsics = new CameraIntrinsicsEntry
             {
-                focal_length_x = intr.focalLength.x, focal_length_y = intr.focalLength.y,
-                principal_point_x = intr.principalPoint.x, principal_point_y = intr.principalPoint.y,
-                image_width = intr.resolution.x, image_height = intr.resolution.y
+                focal_length_x = intr.focalLength.x,
+                focal_length_y = intr.focalLength.y,
+                principal_point_x = intr.principalPoint.x,
+                principal_point_y = intr.principalPoint.y,
+                image_width = intr.resolution.x,
+                image_height = intr.resolution.y
             };
         }
     }
@@ -706,7 +746,7 @@ public class EchoesScanController : MonoBehaviour
     {
         if (Camera.main == null) return null;
         Matrix4x4 m = Camera.main.transform.localToWorldMatrix;
-        return new float[] { m.m00,m.m01,m.m02,m.m03, m.m10,m.m11,m.m12,m.m13, m.m20,m.m21,m.m22,m.m23, m.m30,m.m31,m.m32,m.m33 };
+        return new float[] { m.m00, m.m01, m.m02, m.m03, m.m10, m.m11, m.m12, m.m13, m.m20, m.m21, m.m22, m.m23, m.m30, m.m31, m.m32, m.m33 };
     }
 
     private void LogProcessingEvent(string trigger, string[] hooks)
@@ -725,11 +765,22 @@ public class EchoesScanController : MonoBehaviour
         string filepath = Path.Combine(_sessionFolder, filename);
         if (!TryCaptureImage(filepath)) { LogEvent($"{z} STILL FAILED"); return; }
         Vector3 pos = Camera.main.transform.position; Vector3 euler = Camera.main.transform.eulerAngles;
-        _stills.Add(new StillEntry { index=idx, file=filename, zone=z.ToString(), pitch=NormalisePitch(euler.x), height=pos.y, heading=euler.y,
-            distance_to_start=Vector3.Distance(pos,_startPosition), timestamp=GetUnixTimestamp(), tracking=ARSession.state.ToString(), pose_matrix_4x4=GetCameraPoseMatrix() });
+        _stills.Add(new StillEntry
+        {
+            index = idx,
+            file = filename,
+            zone = z.ToString(),
+            pitch = NormalisePitch(euler.x),
+            height = pos.y,
+            heading = euler.y,
+            distance_to_start = Vector3.Distance(pos, _startPosition),
+            timestamp = GetUnixTimestamp(),
+            tracking = ARSession.state.ToString(),
+            pose_matrix_4x4 = GetCameraPoseMatrix()
+        });
         LogEvent($"{z} STILL {filename}");
         RecordPlaneSnapshot("still_sync", idx);
-        LogProcessingEvent($"still_{idx}_captured", idx==0 ? new[]{"yolo_inference","scale_calibration","srl_query"} : new[]{"yolo_inference","mvs_partial_reconstruction"});
+        LogProcessingEvent($"still_{idx}_captured", idx == 0 ? new[] { "yolo_inference", "scale_calibration", "srl_query" } : new[] { "yolo_inference", "mvs_partial_reconstruction" });
         if (overlay != null) overlay.FlashCapture();   // crosshair + active arrow white flash
         OnStillCaptured?.Invoke(idx, filepath);
     }
@@ -744,11 +795,22 @@ public class EchoesScanController : MonoBehaviour
         string filepath = Path.Combine(_sessionFolder, filename);
         if (!TryCaptureImage(filepath)) { LogEvent("FREE STILL FAILED"); return; }
         Vector3 pos = Camera.main.transform.position; Vector3 euler = Camera.main.transform.eulerAngles;
-        _stills.Add(new StillEntry { index=idx, file=filename, zone="free", pitch=NormalisePitch(euler.x), height=pos.y, heading=euler.y,
-            distance_to_start=Vector3.Distance(pos,_startPosition), timestamp=GetUnixTimestamp(), tracking=ARSession.state.ToString(), pose_matrix_4x4=GetCameraPoseMatrix() });
+        _stills.Add(new StillEntry
+        {
+            index = idx,
+            file = filename,
+            zone = "free",
+            pitch = NormalisePitch(euler.x),
+            height = pos.y,
+            heading = euler.y,
+            distance_to_start = Vector3.Distance(pos, _startPosition),
+            timestamp = GetUnixTimestamp(),
+            tracking = ARSession.state.ToString(),
+            pose_matrix_4x4 = GetCameraPoseMatrix()
+        });
         LogEvent($"FREE STILL {filename}");
         RecordPlaneSnapshot("still_sync", idx);
-        LogProcessingEvent($"still_{idx}_captured", idx==0 ? new[]{"yolo_inference","scale_calibration","srl_query"} : new[]{"yolo_inference","mvs_partial_reconstruction"});
+        LogProcessingEvent($"still_{idx}_captured", idx == 0 ? new[] { "yolo_inference", "scale_calibration", "srl_query" } : new[] { "yolo_inference", "mvs_partial_reconstruction" });
         if (overlay != null) overlay.FlashCapture();
         OnStillCaptured?.Invoke(idx, filepath);
     }
@@ -759,7 +821,7 @@ public class EchoesScanController : MonoBehaviour
         if (!_cameraManager.TryAcquireLatestCpuImage(out XRCpuImage image)) return false;
         using (image)
         {
-            var cp = new XRCpuImage.ConversionParams { inputRect=new RectInt(0,0,image.width,image.height), outputDimensions=new Vector2Int(image.width,image.height), outputFormat=TextureFormat.RGBA32, transformation=XRCpuImage.Transformation.MirrorY };
+            var cp = new XRCpuImage.ConversionParams { inputRect = new RectInt(0, 0, image.width, image.height), outputDimensions = new Vector2Int(image.width, image.height), outputFormat = TextureFormat.RGBA32, transformation = XRCpuImage.Transformation.MirrorY };
             var buf = new NativeArray<byte>(image.GetConvertedDataSize(cp), Allocator.Temp);
             image.Convert(cp, buf);
             var tex = new Texture2D(image.width, image.height, TextureFormat.RGBA32, false);
@@ -774,29 +836,55 @@ public class EchoesScanController : MonoBehaviour
         // v2.4.10: refresh depth stats once here so both the snapshot and any
         // subsequent diagnostic sample read a consistent cached value.
         GetDepthStats(out _lastDepthPoints, out _lastDepthDensity);
-        int raw=0, horz=0, vert=0; var details = new List<PlaneDetail>();
+        int raw = 0, horz = 0, vert = 0; var details = new List<PlaneDetail>();
+        // v2.4.11 FIX COUNT: matured counts derived from THIS walk, so they can
+        // never disagree with the details list. immature = zero-size boundary.
+        int maturedHorz = 0, maturedVert = 0;
         if (_planeManager != null)
         {
             foreach (var plane in _planeManager.trackables)
             {
                 raw++; string t;
+                bool isVert = false, isHorz = false;
                 switch (plane.alignment)
                 {
-                    case PlaneAlignment.HorizontalUp:   t="HorizontalUp";   horz++; break;
-                    case PlaneAlignment.HorizontalDown: t="HorizontalDown"; horz++; break;
-                    case PlaneAlignment.Vertical:       t="Vertical";       vert++; break;
-                    default:                            t="NotAxisAligned"; break;
+                    case PlaneAlignment.HorizontalUp: t = "HorizontalUp"; horz++; isHorz = true; break;
+                    case PlaneAlignment.HorizontalDown: t = "HorizontalDown"; horz++; isHorz = true; break;
+                    case PlaneAlignment.Vertical: t = "Vertical"; vert++; isVert = true; break;
+                    default: t = "NotAxisAligned"; break;
                 }
-                // v2.4.9 FIX D: a plane whose boundary has not matured reports size 0.
-                // Tag it so downstream can distinguish "immature" from a real 0-size error.
                 bool immature = (plane.size.x <= 0.0001f || plane.size.y <= 0.0001f);
-                details.Add(new PlaneDetail { id=plane.trackableId.ToString(), type=t, classification=plane.classifications.ToString(), width=plane.size.x, height=plane.size.y, immature=immature });
+                if (!immature && isHorz) maturedHorz++;
+                if (!immature && isVert) maturedVert++;
+                details.Add(new PlaneDetail { id = plane.trackableId.ToString(), type = t, classification = plane.classifications.ToString(), width = plane.size.x, height = plane.size.y, immature = immature });
             }
         }
-        int deduped     = _debugManager != null ? _debugManager.GetRealHorizontalPlaneCount() : horz;
-        int dedupedVert = _debugManager != null ? _debugManager.GetRealVerticalPlaneCount()   : vert;
-        var entry = new PlaneEntry { timestamp=GetUnixTimestamp(), raw_plane_ids=raw, surfaces=deduped, vertical_surfaces=dedupedVert, synced_still=syncedStill, reason=reason, tracking=ARSession.state.ToString(),
-            horizontal_planes=horz, vertical_planes=vert, feature_point_count=GetFeaturePointCount(), ambient_intensity=_ambientIntensity, color_temperature=_colorTemperature, depth_available=CheckDepthAvailable(), depth_points=_lastDepthPoints, depth_density_per_m2=_lastDepthDensity, plane_details=details };
+        // Old deduped counts (second live read) kept for continuity/comparison.
+        int deduped = _debugManager != null ? _debugManager.GetRealHorizontalPlaneCount() : horz;
+        int dedupedVert = _debugManager != null ? _debugManager.GetRealVerticalPlaneCount() : vert;
+        var entry = new PlaneEntry
+        {
+            timestamp = GetUnixTimestamp(),
+            raw_plane_ids = raw,
+            surfaces = deduped,
+            vertical_surfaces = dedupedVert,
+            matured_surfaces = maturedHorz,
+            matured_vertical = maturedVert,
+            synced_still = syncedStill,
+            reason = reason,
+            tracking = ARSession.state.ToString(),
+            horizontal_planes = horz,
+            vertical_planes = vert,
+            feature_point_count = GetFeaturePointCount(),
+            ambient_intensity = _ambientIntensity,
+            color_temperature = _colorTemperature,
+            light_frames = _lightFrameCount,
+            light_seen = _lightEverSeen,
+            depth_available = CheckDepthAvailable(),
+            depth_points = _lastDepthPoints,
+            depth_density_per_m2 = _lastDepthDensity,
+            plane_details = details
+        };
         _planeLog.Add(entry); return entry;
     }
 
@@ -805,16 +893,17 @@ public class EchoesScanController : MonoBehaviour
     {
         // v2.4.10: refresh depth stats for this sample.
         GetDepthStats(out _lastDepthPoints, out _lastDepthDensity);
-        int horz=0, vert=0;
+        int horz = 0, vert = 0, mHorz = 0, mVert = 0;
         if (_planeManager != null)
         {
             foreach (var plane in _planeManager.trackables)
             {
+                bool immature = (plane.size.x <= 0.0001f || plane.size.y <= 0.0001f);
                 switch (plane.alignment)
                 {
                     case PlaneAlignment.HorizontalUp:
-                    case PlaneAlignment.HorizontalDown: horz++; break;
-                    case PlaneAlignment.Vertical:       vert++; break;
+                    case PlaneAlignment.HorizontalDown: horz++; if (!immature) mHorz++; break;
+                    case PlaneAlignment.Vertical: vert++; if (!immature) mVert++; break;
                 }
             }
         }
@@ -823,20 +912,31 @@ public class EchoesScanController : MonoBehaviour
         float zoneElapsedMs = (_zoneIndex >= 0 && !_inTransition) ? _zoneTimer * 1000f : 0f;
         string zoneName = (_zoneIndex >= 0 && _zoneIndex < ZONE_ORDER.Length) ? ZONE_ORDER[_zoneIndex].ToString() : "none";
 
-        _diagSamples.Add(new DiagnosticSample {
+        _diagSamples.Add(new DiagnosticSample
+        {
             timestamp_unix_ms = GetUnixTimestamp() * 1000.0,
             current_zone = zoneName,
             instruction_state = _instructionState,
             zone_elapsed_ms = zoneElapsedMs,
             tracking = ARSession.state.ToString(),
-            horizontal_planes = horz, vertical_planes = vert,
+            horizontal_planes = horz,
+            vertical_planes = vert,
             feature_point_count = GetFeaturePointCount(),
             depth_available = CheckDepthAvailable(),
             depth_points = _lastDepthPoints,
             depth_density_per_m2 = _lastDepthDensity,
-            ambient_intensity = _ambientIntensity, color_temperature = _colorTemperature,
-            pos_x = pos.x, pos_y = pos.y, pos_z = pos.z,
-            rot_x = rot.x, rot_y = rot.y, rot_z = rot.z
+            matured_surfaces = mHorz,
+            matured_vertical = mVert,
+            light_frames = _lightFrameCount,
+            light_seen = _lightEverSeen,
+            ambient_intensity = _ambientIntensity,
+            color_temperature = _colorTemperature,
+            pos_x = pos.x,
+            pos_y = pos.y,
+            pos_z = pos.z,
+            rot_x = rot.x,
+            rot_y = rot.y,
+            rot_z = rot.z
         });
     }
 
@@ -861,7 +961,7 @@ public class EchoesScanController : MonoBehaviour
     // above is unchanged and the scan still runs exactly as v2.4.9.
     private void GetDepthStats(out int validPoints, out float densityPerM2)
     {
-        validPoints  = 0;
+        validPoints = 0;
         densityPerM2 = 0f;
         if (_occlusionManager == null || !_occlusionManager.enabled) return;
 
@@ -872,8 +972,8 @@ public class EchoesScanController : MonoBehaviour
             // Reinterpret the byte NativeArray as floats with zero per-pixel allocation.
             var plane = img.GetPlane(0);
             var floats = plane.data.Reinterpret<float>(1); // 1 byte -> element size, view as float
-            int count  = floats.Length;
-            int valid  = 0;
+            int count = floats.Length;
+            int valid = 0;
             // Subsample every Nth pixel to keep this cheap at 2Hz. Density is a ratio,
             // so a consistent stride does not bias points-per-m2 (we scale back up).
             const int STRIDE = 4;
@@ -914,8 +1014,8 @@ public class EchoesScanController : MonoBehaviour
     }
 
     private void SetPrompt(string msg) { if (promptText != null) promptText.text = msg; }
-    private void SetHud(string msg)    { if (hudText    != null) hudText.text    = msg; }
-    private void SetBorder(Color c)    { borderRelay?.SetColor(c); }
+    private void SetHud(string msg) { if (hudText != null) hudText.text = msg; }
+    private void SetBorder(Color c) { borderRelay?.SetColor(c); }
 
     // ----------------------------------------------------------
     //  PART ONE — MANIFEST WRITER (completed in v2.4.6)
@@ -924,20 +1024,22 @@ public class EchoesScanController : MonoBehaviour
     //  names exactly match the C# class definitions (snake_case),
     //  which the v2.4.7 parser and the Diff Engine will read.
     // ----------------------------------------------------------
-    [Serializable] private class GuidedScanBlock
+    [Serializable]
+    private class GuidedScanBlock
     {
-        public bool   guided_scan_mode;
+        public bool guided_scan_mode;
         public string[] zone_sequence;
-        public float  zone_duration_setting;
-        public bool   tilt_up;
+        public float zone_duration_setting;
+        public bool tilt_up;
         public List<ZoneRecord> zones = new List<ZoneRecord>();
     }
-    [Serializable] private class SessionManifest
+    [Serializable]
+    private class SessionManifest
     {
         public string session_id;
         public string version;
         public string scenario_tag;     // v2.4.7 — top-level, default empty string
-        public bool   free_scan_mode;   // v2.4.7 — top-level
+        public bool free_scan_mode;   // v2.4.7 — top-level
         public double written_unix;
         public GuidedScanBlock guided_scan;
         public CameraIntrinsicsEntry camera_intrinsics;
@@ -981,13 +1083,14 @@ public class EchoesScanController : MonoBehaviour
     }
 
     // PART THREE — write the continuous diagnostic file
-    [Serializable] private class DiagnosticFile
+    [Serializable]
+    private class DiagnosticFile
     {
         public string session_id;
         public string version;
         public string scenario_tag;     // v2.4.7 — pairs with the manifest
-        public bool   free_scan_mode;   // v2.4.7 — pairs with the manifest
-        public float  sample_interval_seconds;
+        public bool free_scan_mode;   // v2.4.7 — pairs with the manifest
+        public float sample_interval_seconds;
         public List<DiagnosticSample> samples = new List<DiagnosticSample>();
     }
 
@@ -1009,9 +1112,9 @@ public class EchoesScanController : MonoBehaviour
         Diag($"Diagnostic log written: {filename}  samples={_diagSamples.Count}");
     }
 
-    private void LogEvent(string msg) { string e=$"{DateTime.Now:HH:mm:ss.fff} {msg}"; _log.Add(e); Debug.Log("[Echoes] "+e); }
-    private double GetUnixTimestamp() => (DateTime.UtcNow - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalSeconds;
+    private void LogEvent(string msg) { string e = $"{DateTime.Now:HH:mm:ss.fff} {msg}"; _log.Add(e); Debug.Log("[Echoes] " + e); }
+    private double GetUnixTimestamp() => (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
     private float NormalisePitch(float rawX) { if (rawX > 180f) rawX -= 360f; return -rawX; }
-    private float HeadingDelta(float a, float b) { float d=Mathf.Abs(a-b)%360f; return d>180f?360f-d:d; }
-    private string EscapeJson(string s) => s.Replace("\\","\\\\").Replace("\"","\\\"");
+    private float HeadingDelta(float a, float b) { float d = Mathf.Abs(a - b) % 360f; return d > 180f ? 360f - d : d; }
+    private string EscapeJson(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
 }
