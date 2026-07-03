@@ -1,8 +1,25 @@
 // ============================================================
 //  EchoesScanHUD.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.8 | 27 June 2026
+//  Version: v2.4.12 | 03 July 2026
 //
+//  v2.4.12 — Test Code Input
+//  ----------------------------------------------------------
+//  TEST CODE INPUT — small TMP_InputField added top-right (mirrors the
+//              diag overlay footprint top-left, so neither covers the
+//              other or the existing controls). Placeholder reads
+//              "test code". Injected into the controller as
+//              ctrl.testCodeField; the controller reads its text into
+//              scenarioTag the moment START is pressed. scenarioTag
+//              already existed and was already written into every
+//              manifest; this is the missing entry point, not a new
+//              manifest field. Type once per block of repeats, same as
+//              the existing scenarioTag comment describes.
+//              ROLLBACK: remove BuildTestCodeField() call and its
+//              contents, and the ctrl.testCodeField assignment. Nothing
+//              else in the HUD changes.
+//
+//  ----------------------------------------------------------
 //  v2.4.8 — version-paired with the controller. No HUD logic change
 //  this version: the two field-test fixes (diagnostic overlay moved
 //  off the SET POSE button, light estimation requested) are both
@@ -172,6 +189,13 @@ public class EchoesScanHUD : MonoBehaviour
         ctrl.overlay = gRelay;
         EchoesBootstrap.Diag("HUD: guided overlay injected");
 
+        // --- TEST CODE INPUT (v2.4.12) ---
+        // Top-right, mirrors the diag overlay's top-left footprint (0-38% x,
+        // 70-100% y) so neither covers the other or the prompt/control bar.
+        var testCodeInput = BuildTestCodeField(root);
+        ctrl.testCodeField = testCodeInput;
+        EchoesBootstrap.Diag("HUD: testCodeField injected");
+
         EchoesBootstrap.Diag("HUD.Start() COMPLETE -- all refs injected");
     }
 
@@ -248,6 +272,59 @@ public class EchoesScanHUD : MonoBehaviour
         lbl.alignment = TextAlignmentOptions.Center; lbl.fontStyle = FontStyles.Bold;
         Stretch(lbl.rectTransform);
         return (go.GetComponent<Button>(), lbl);
+    }
+
+    // v2.4.12 — small labelled TMP_InputField, top-right corner.
+    // Placeholder reads "test code". Built manually (background Image +
+    // Text Area with RectMask2D + Placeholder + Text) since TMP_InputField
+    // has no parameterless "just works" constructor. Mirrors the diag
+    // overlay's top-left footprint on the opposite corner.
+    private TMP_InputField BuildTestCodeField(Transform root)
+    {
+        var panel = NewEmpty("TestCodePanel", root);
+        panel.anchorMin = new Vector2(0.62f, 0.70f);
+        panel.anchorMax = new Vector2(1.00f, 1.00f);
+        panel.offsetMin = panel.offsetMax = Vector2.zero;
+
+        var label = NewTMP("TestCodeLabel", panel, "TEST CODE", 12f, true, Msg);
+        Anchor(label.rectTransform, 0.5f, 0.82f, 220f, 26f);
+        label.alignment = TextAlignmentOptions.Center;
+
+        var fieldGo = new GameObject("TestCodeField", typeof(RectTransform), typeof(Image), typeof(TMP_InputField));
+        fieldGo.transform.SetParent(panel, false);
+        var fieldRt = fieldGo.GetComponent<RectTransform>();
+        fieldRt.anchorMin = new Vector2(0.5f, 0.5f);
+        fieldRt.anchorMax = new Vector2(0.5f, 0.5f);
+        fieldRt.pivot = new Vector2(0.5f, 0.5f);
+        fieldRt.sizeDelta = new Vector2(220f, 44f);
+        fieldRt.anchoredPosition = new Vector2(0f, -6f);
+        var fieldBg = fieldGo.GetComponent<Image>();
+        fieldBg.color = new Color(1f, 1f, 1f, 0.12f);
+
+        var textArea = new GameObject("TextArea", typeof(RectTransform), typeof(RectMask2D));
+        textArea.transform.SetParent(fieldGo.transform, false);
+        var textAreaRt = textArea.GetComponent<RectTransform>();
+        Stretch(textAreaRt);
+        textAreaRt.offsetMin = new Vector2(10f, 6f);
+        textAreaRt.offsetMax = new Vector2(-10f, -6f);
+
+        var placeholder = NewTMP("Placeholder", textArea.transform, "test code", 16f, false,
+                                  new Color(1f, 1f, 1f, 0.35f));
+        Stretch(placeholder.rectTransform);
+        placeholder.alignment = TextAlignmentOptions.MidlineLeft;
+        placeholder.fontStyle = FontStyles.Italic;
+
+        var text = NewTMP("Text", textArea.transform, "", 16f, false, Light);
+        Stretch(text.rectTransform);
+        text.alignment = TextAlignmentOptions.MidlineLeft;
+
+        var input = fieldGo.GetComponent<TMP_InputField>();
+        input.textViewport = textAreaRt;
+        input.textComponent = text;
+        input.placeholder = placeholder;
+        input.characterLimit = 24;
+
+        return input;
     }
 
     private void Anchor(RectTransform rt, float ax, float ay, float w, float h)

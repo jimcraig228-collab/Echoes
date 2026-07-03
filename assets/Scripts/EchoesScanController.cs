@@ -1,8 +1,49 @@
 // ============================================================
 //  EchoesScanController.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.9 | 01 July 2026
+//  Version: v2.4.12 | 03 July 2026
 //
+//  v2.4.12 — Brightness Serialisation Fix, Tracking Reason, Test Code Input
+//  ----------------------------------------------------------
+//  FIX BRIGHT — ambient_intensity and color_temperature were declared as
+//              float? (nullable). Unity's JsonUtility does not reliably
+//              serialise nullable value types, both fields were silently
+//              absent from every manifest ever written, confirmed by
+//              reading raw session JSON directly, not just the Sheet.
+//              Both fields are now plain float with a -1 sentinel meaning
+//              "not yet observed this session" (light_seen already covers
+//              presence, so -1 is a safe, explicit default).
+//              ROLLBACK: revert _ambientIntensity/_colorTemperature and
+//              the matching PlaneEntry/DiagnosticSample fields to float?,
+//              revert the two sentinel initialisers below.
+//
+//  FIX TRACK-REASON — tracking only ever logged ARSession.state (e.g.
+//              "SessionTracking"), which cannot explain a tracking-quality
+//              problem. tracking_failure_reason now logs
+//              ARSession.notTrackingReason on every plane snapshot and
+//              diagnostic sample (reads None when tracking is healthy).
+//              ADDITIVE ONLY, no existing field changed or removed.
+//              ROLLBACK: remove the two tracking_failure_reason fields and
+//              their two assignments.
+//
+//  TEST CODE INPUT — scenarioTag already existed and was already written
+//              top-level into every manifest, but nothing ever set it, so
+//              it stayed empty all cycle. StartScan() now reads
+//              testCodeField.text (injected by the HUD, v2.4.12) into
+//              scenarioTag at the moment START is pressed. No manifest
+//              schema change, this field already existed.
+//
+//  NOT INCLUDED THIS VERSION (see spec doc for reasoning):
+//    - Plane width/height/area: already correct in the raw manifest,
+//      confirmed by direct inspection. Not a scanner bug.
+//    - Native ARCore classification: code is correct, ARCore itself
+//      returns None on this device/config. No code fix identified.
+//    - Feature-point confidence: ARFoundation API surface for per-point
+//      confidence could not be confirmed against the installed package
+//      version from outside the Unity project. Deferred rather than
+//      shipping an unverified API call.
+//
+//  ----------------------------------------------------------
 //  v2.4.11 — Count Consistency + Light Observability (test build)
 //  ----------------------------------------------------------
 //  FIX COUNT — surfaces (deduped) and plane_details came from two
@@ -104,7 +145,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.11";
+    private const string VERSION = "v2.4.12";
 
     [HideInInspector] public BorderColorRelay borderRelay;
     [HideInInspector] public TextMeshProUGUI promptText;
@@ -115,6 +156,12 @@ public class EchoesScanController : MonoBehaviour
 
     // --- Guided overlay refs (injected by HUD, v2.4.6) ---
     [HideInInspector] public GuidedOverlayRelay overlay;
+
+    // --- Test code input ref (injected by HUD, v2.4.12) ---
+    // Read into scenarioTag at StartScan(). scenarioTag itself already
+    // existed and was already written top-level into the manifest; this
+    // is the missing entry point, not a new manifest field.
+    [HideInInspector] public TMP_InputField testCodeField;
 
     [Header("Pose Gate")]
     public bool gateOnPitch = true;
@@ -177,8 +224,11 @@ public class EchoesScanController : MonoBehaviour
     private float _sessionStartTime;
     private float _savedPitch, _savedHeight, _savedHeading;
     private bool _hasSavedPose = false;
-    private float? _ambientIntensity = null;
-    private float? _colorTemperature = null;
+    // v2.4.12 FIX BRIGHT: was float?. JsonUtility does not reliably
+    // serialise nullable value types, both fields were silently absent
+    // from every manifest ever written. -1 sentinel = not yet observed.
+    private float _ambientIntensity = -1f;
+    private float _colorTemperature = -1f;
     private int _lightFrameCount = 0;      // v2.4.11: frames OnCameraFrame saw
     private bool _lightEverSeen = false;  // v2.4.11: any light value ever delivered
     private string _sessionId, _sessionFolder, _sessionStamp;
@@ -271,10 +321,12 @@ public class EchoesScanController : MonoBehaviour
     {
         public double timestamp; public int raw_plane_ids, surfaces, vertical_surfaces, synced_still;
         public string reason, tracking;
+        public string tracking_failure_reason; // v2.4.12 additive, ARSession.notTrackingReason
         public int horizontal_planes, vertical_planes, feature_point_count;
         public int matured_surfaces, matured_vertical;   // v2.4.11 honest counts
         public int light_frames; public bool light_seen; // v2.4.11 light observability
-        public float? ambient_intensity, color_temperature; public bool depth_available;
+        // v2.4.12 FIX BRIGHT: was float?. -1 sentinel = not yet observed this session.
+        public float ambient_intensity, color_temperature; public bool depth_available;
         public int depth_points; public float depth_density_per_m2; // v2.4.10 additive
         public List<PlaneDetail> plane_details = new List<PlaneDetail>();
     }
@@ -300,13 +352,15 @@ public class EchoesScanController : MonoBehaviour
         public string current_zone, instruction_state;
         public float zone_elapsed_ms;
         public string tracking;
+        public string tracking_failure_reason; // v2.4.12 additive, ARSession.notTrackingReason
         public int horizontal_planes, vertical_planes, feature_point_count;
         public bool depth_available;
         public int depth_points;          // v2.4.10 additive
         public float depth_density_per_m2;  // v2.4.10 additive
         public int matured_surfaces, matured_vertical; // v2.4.11
         public int light_frames; public bool light_seen; // v2.4.11
-        public float? ambient_intensity, color_temperature;
+        // v2.4.12 FIX BRIGHT: was float?. -1 sentinel = not yet observed this session.
+        public float ambient_intensity, color_temperature;
         public float pos_x, pos_y, pos_z, rot_x, rot_y, rot_z;
     }
 
@@ -672,6 +726,12 @@ public class EchoesScanController : MonoBehaviour
         if (!_poseGatePassed) { EvaluatePoseGate(); return; }
         if (Camera.main == null) return;
 
+        // v2.4.12 TEST CODE INPUT: scenarioTag already existed and was
+        // already written top-level into the manifest; nothing ever set
+        // it before now. Read whatever is in the HUD field at the moment
+        // START is pressed, so it is locked in for this session's manifest.
+        if (testCodeField != null) scenarioTag = testCodeField.text;
+
         // --- v2.4.7 FIX 1: session-merge ---
         // Re-initialise the session at the top of every START so back-to-back
         // scans each get a fresh id/folder/filename and empty data lists.
@@ -873,6 +933,7 @@ public class EchoesScanController : MonoBehaviour
             synced_still = syncedStill,
             reason = reason,
             tracking = ARSession.state.ToString(),
+            tracking_failure_reason = ARSession.notTrackingReason.ToString(), // v2.4.12
             horizontal_planes = horz,
             vertical_planes = vert,
             feature_point_count = GetFeaturePointCount(),
@@ -919,6 +980,7 @@ public class EchoesScanController : MonoBehaviour
             instruction_state = _instructionState,
             zone_elapsed_ms = zoneElapsedMs,
             tracking = ARSession.state.ToString(),
+            tracking_failure_reason = ARSession.notTrackingReason.ToString(), // v2.4.12
             horizontal_planes = horz,
             vertical_planes = vert,
             feature_point_count = GetFeaturePointCount(),
