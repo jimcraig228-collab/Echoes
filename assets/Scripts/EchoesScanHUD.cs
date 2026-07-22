@@ -1,8 +1,26 @@
 // ============================================================
 //  EchoesScanHUD.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.12 | 03 July 2026
+//  Version: v2.4.13 | 22 July 2026
 //
+//  v2.4.13 — Six-Zone Border/Arrow Mapping
+//  ----------------------------------------------------------
+//  ZONE RESTRUCTURE — BorderFor()/ArrowFor() extended for the six-zone
+//              sequence (EchoesScanController.cs, same version).
+//              TiltUp and TiltDown both use borderBottom (same edge
+//              the old single Tilt zone used), distinguished by arrow:
+//              TiltUp -> arrowUp, TiltDown -> arrowDown. Previously
+//              Tilt always used arrowUp regardless of direction, a
+//              small pre-existing inconsistency this also fixes.
+//              ReturnCentre uses borderTop, the same edge as Centre,
+//              so returning to centre visually reactivates the border
+//              you already closed out, which reads correctly on
+//              screen: go back to the thing that's already green.
+//              No new UI assets needed, existing arrowDown was already
+//              present but unused until now.
+//              ROLLBACK: restore the four-case switches.
+//
+//  ----------------------------------------------------------
 //  v2.4.12 — Test Code Input
 //  ----------------------------------------------------------
 //  TEST CODE INPUT — small TMP_InputField added top-right (mirrors the
@@ -428,7 +446,9 @@ public class GuidedOverlayRelay : MonoBehaviour
             case EchoesScanController.Zone.Centre: return borderTop;   // centre uses top edge as its marker
             case EchoesScanController.Zone.Left:   return borderLeft;
             case EchoesScanController.Zone.Right:  return borderRight;
-            case EchoesScanController.Zone.Tilt:   return borderBottom; // tilt-up marker on bottom; arrow handles direction
+            case EchoesScanController.Zone.TiltUp:   return borderBottom; // tilt marker on bottom; arrow handles direction
+            case EchoesScanController.Zone.TiltDown: return borderBottom; // same edge, arrowDown distinguishes it
+            case EchoesScanController.Zone.ReturnCentre: return borderTop; // v2.4.13: same edge as Centre, reactivates it
             default: return borderTop;
         }
     }
@@ -439,8 +459,9 @@ public class GuidedOverlayRelay : MonoBehaviour
         {
             case EchoesScanController.Zone.Left:  return arrowLeft;
             case EchoesScanController.Zone.Right: return arrowRight;
-            case EchoesScanController.Zone.Tilt:  return arrowUp;      // tilt = up
-            default: return null;                                     // centre = no arrow
+            case EchoesScanController.Zone.TiltUp:   return arrowUp;
+            case EchoesScanController.Zone.TiltDown: return arrowDown; // v2.4.13: was always arrowUp before, now correct
+            default: return null;                                     // centre / return-centre = no arrow
         }
     }
 

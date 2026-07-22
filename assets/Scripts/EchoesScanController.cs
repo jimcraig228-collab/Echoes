@@ -1,8 +1,72 @@
 // ============================================================
 //  EchoesScanController.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.12 | 03 July 2026
+//  Version: v2.4.13 | 22 July 2026
 //
+//  v2.4.13 — Six-Zone Sequence, Loop Closure, Real Duration Logging
+//  ----------------------------------------------------------
+//  ZONE RESTRUCTURE — Zone enum extended from four zones
+//              (Centre/Left/Right/Tilt) to six: Centre, Left, Right,
+//              TiltUp, ReturnCentre, TiltDown. Driven directly by field
+//              data: two prior anomalies (O9, O11) turned out to be
+//              single-fixed-viewpoint protocols with no way to recover
+//              from one bad angle, while every zone-based, multi-angle
+//              protocol matured consistently across every repeat.
+//              TiltUp and TiltDown are now separate zones each with
+//              their own prompt and arrow, replacing the old single
+//              Tilt zone whose direction was set once per session via
+//              the tiltUp bool. That bool and its manifest field
+//              (guided_scan.tilt_up) are REMOVED, both directions run
+//              every session now, there is nothing left to toggle.
+//              ROLLBACK: restore the four-entry Zone enum and
+//              ZONE_ORDER, restore the tiltUp bool and tilt_up
+//              manifest field, restore the combined Tilt case in
+//              ZoneInstruction(), restore the four-case BorderFor/
+//              ArrowFor switches in EchoesScanHUD.cs.
+//
+//  RETURN-CENTRE LOOP CLOSURE — the new ReturnCentre zone (5th in the
+//              sequence) asks the operator to match the original
+//              Centre framing, per the Cortex vision doc's own
+//              field-scanning protocol (Appendix A: return to origin,
+//              hold for closure). The still captured for Centre now
+//              has its heading and pitch cached; every subsequent
+//              still (most meaningfully ReturnCentre) logs
+//              heading_delta_from_origin and pitch_delta_from_origin
+//              against that cached framing, so how well the loop
+//              actually closed is measurable, not just attempted.
+//              ADDITIVE fields on StillEntry.
+//              ROLLBACK: remove the two cached fields, the two
+//              StillEntry fields, and their computation in
+//              CaptureStillForZone().
+//
+//  DEFAULT DURATION — zoneDurationSeconds default changed from 5f to
+//              10f, so on-screen guidance matches intended dwell by
+//              default instead of relying on being remembered each
+//              session (root cause of the 22 July mismatch where 10s
+//              was actually held but the app's own record, and its
+//              guidance, said 5s).
+//
+//  ACTUAL DURATION LOGGING — StillEntry gains
+//              actual_zone_seconds, measured wall-clock time between
+//              this zone's AdvanceZone() start and its still capture.
+//              HONEST SCOPE NOTE, read before assuming this solves
+//              the 22 July mismatch retroactively: the zone state
+//              machine auto-advances the instant zoneDurationSeconds
+//              elapses, unconditionally, so under normal operation
+//              this value will simply equal the configured duration.
+//              Its real value is catching genuine drift (a frame-rate
+//              hitch, an app pause) between configured and actual
+//              timer-window length. It does NOT and cannot detect an
+//              operator physically holding position past a zone's end
+//              while later zones' prompts have already advanced, that
+//              would need motion-based dwell detection independent of
+//              the zone timer, a materially bigger feature, not built
+//              here. Flagging this now so it is not assumed solved.
+//              ADDITIVE field on StillEntry.
+//              ROLLBACK: remove actual_zone_seconds and its
+//              computation in CaptureStillForZone().
+//
+//  ----------------------------------------------------------
 //  v2.4.12 — Brightness Serialisation Fix, Tracking Reason, Test Code Input
 //  ----------------------------------------------------------
 //  FIX BRIGHT — ambient_intensity and color_temperature were declared as
@@ -145,7 +209,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.12";
+    private const string VERSION = "v2.4.13";
 
     [HideInInspector] public BorderColorRelay borderRelay;
     [HideInInspector] public TextMeshProUGUI promptText;
@@ -171,13 +235,11 @@ public class EchoesScanController : MonoBehaviour
     public float targetPitch = -35f;
     public float pitchToleranceDeg = 8f;
 
-    [Header("Guided Scan — Zone Sequence (v2.4.6)")]
-    [Tooltip("Dwell seconds per zone. Configurable, not hardcoded. Default 5s each.")]
-    public float zoneDurationSeconds = 5f;
+    [Header("Guided Scan — Zone Sequence (v2.4.13: six zones)")]
+    [Tooltip("Dwell seconds per zone. Configurable, not hardcoded. Default 10s each (v2.4.13, was 5s).")]
+    public float zoneDurationSeconds = 10f;
     [Tooltip("Half-second transition beat between zones (spec 6.1).")]
     public float zoneTransitionSeconds = 0.5f;
-    [Tooltip("Tilt zone direction. Up by default (lift toward far wall/ceiling).")]
-    public bool tiltUp = true;
 
     [Header("Diagnostic Sampler (v2.4.6 Part Three)")]
     [Tooltip("Continuous diagnostic sample interval (seconds). Configurable. Default 0.5s = 500ms.")]
@@ -239,10 +301,14 @@ public class EchoesScanController : MonoBehaviour
     private List<string> _log = new List<string>();
     private float _startPitch, _startHeight, _startHeading;
     private int _lastRawPlaneCount = -1;
+    // v2.4.13: cached from the Centre zone's still, used to measure how
+    // well ReturnCentre actually closes the loop.
+    private float _originCentreHeading = 0f, _originCentrePitch = 0f;
+    private bool _hasOriginCentre = false;
 
-    // --- Zone state machine (v2.4.6) ---
-    public enum Zone { Centre, Left, Right, Tilt }
-    private static readonly Zone[] ZONE_ORDER = { Zone.Centre, Zone.Left, Zone.Right, Zone.Tilt };
+    // --- Zone state machine (v2.4.13: six zones, was four) ---
+    public enum Zone { Centre, Left, Right, TiltUp, ReturnCentre, TiltDown }
+    private static readonly Zone[] ZONE_ORDER = { Zone.Centre, Zone.Left, Zone.Right, Zone.TiltUp, Zone.ReturnCentre, Zone.TiltDown };
     private int _zoneIndex = -1;       // -1 before sequence start
     private float _zoneTimer = 0f;
     private bool _inTransition = false;
@@ -310,6 +376,15 @@ public class EchoesScanController : MonoBehaviour
         public int index; public string file, tracking, zone;
         public float pitch, height, heading, distance_to_start;
         public double timestamp; public float[] pose_matrix_4x4;
+        // v2.4.13: how far this still's framing sits from the original
+        // Centre still's framing. Meaningful mainly for ReturnCentre, the
+        // direct measure of whether the loop actually closed.
+        public float heading_delta_from_origin, pitch_delta_from_origin;
+        // v2.4.13: measured wall-clock seconds between this zone's start
+        // and this still's capture. See header note on honest scope,
+        // this equals zoneDurationSeconds under normal operation; it
+        // catches timer drift, not an operator holding past guidance.
+        public float actual_zone_seconds;
     }
     [Serializable]
     public class PlaneDetail
@@ -645,9 +720,9 @@ public class EchoesScanController : MonoBehaviour
             case Zone.Centre: return "CENTRE — hold still on the reference object";
             case Zone.Left: return "LEFT — sweep left, keep crosshair on reference";
             case Zone.Right: return "RIGHT — sweep right, keep crosshair on reference";
-            case Zone.Tilt:
-                return tiltUp ? "TILT UP — lift toward the far wall"
-                                            : "TILT DOWN — lower toward the floor";
+            case Zone.TiltUp: return "TILT UP — lift toward the far wall";
+            case Zone.ReturnCentre: return "RETURN TO CENTRE — match your original framing to close the loop";
+            case Zone.TiltDown: return "TILT DOWN — lower toward the floor";
             default: return z.ToString();
         }
     }
@@ -683,6 +758,7 @@ public class EchoesScanController : MonoBehaviour
         _zoneIndex = -1; _zoneTimer = 0f; _inTransition = false; _transitionTimer = 0f;
         _stillFiredThisZone = false; _instructionState = "idle"; _diagTimer = 0f;
         _scanning = false; _poseGatePassed = false;
+        _hasOriginCentre = false; _originCentreHeading = 0f; _originCentrePitch = 0f; // v2.4.13
     }
 
     private void EvaluatePoseGate()
@@ -825,18 +901,50 @@ public class EchoesScanController : MonoBehaviour
         string filepath = Path.Combine(_sessionFolder, filename);
         if (!TryCaptureImage(filepath)) { LogEvent($"{z} STILL FAILED"); return; }
         Vector3 pos = Camera.main.transform.position; Vector3 euler = Camera.main.transform.eulerAngles;
+        float pitchNow = NormalisePitch(euler.x);
+        float headingNow = euler.y;
+
+        // v2.4.13: cache the Centre zone's framing as the loop-closure
+        // origin. First zone in the sequence, so this always runs before
+        // ReturnCentre needs it.
+        if (z == Zone.Centre)
+        {
+            _originCentreHeading = headingNow;
+            _originCentrePitch = pitchNow;
+            _hasOriginCentre = true;
+        }
+        float headingDelta = 0f, pitchDelta = 0f;
+        if (_hasOriginCentre)
+        {
+            headingDelta = Mathf.DeltaAngle(_originCentreHeading, headingNow);
+            pitchDelta = pitchNow - _originCentrePitch;
+        }
+
+        // v2.4.13: actual wall-clock time this zone's timer window ran
+        // for. See header note, ROLLBACK, and honest-scope comment above
+        // the StillEntry field itself before reading meaning into this.
+        float actualZoneSeconds = zoneDurationSeconds;
+        if (_zoneRecords.Count > 0)
+        {
+            var currentZr = _zoneRecords[_zoneRecords.Count - 1];
+            actualZoneSeconds = (float)(GetUnixTimestamp() - currentZr.start_timestamp);
+        }
+
         _stills.Add(new StillEntry
         {
             index = idx,
             file = filename,
             zone = z.ToString(),
-            pitch = NormalisePitch(euler.x),
+            pitch = pitchNow,
             height = pos.y,
-            heading = euler.y,
+            heading = headingNow,
             distance_to_start = Vector3.Distance(pos, _startPosition),
             timestamp = GetUnixTimestamp(),
             tracking = ARSession.state.ToString(),
-            pose_matrix_4x4 = GetCameraPoseMatrix()
+            pose_matrix_4x4 = GetCameraPoseMatrix(),
+            heading_delta_from_origin = headingDelta,
+            pitch_delta_from_origin = pitchDelta,
+            actual_zone_seconds = actualZoneSeconds
         });
         LogEvent($"{z} STILL {filename}");
         RecordPlaneSnapshot("still_sync", idx);
@@ -1092,7 +1200,8 @@ public class EchoesScanController : MonoBehaviour
         public bool guided_scan_mode;
         public string[] zone_sequence;
         public float zone_duration_setting;
-        public bool tilt_up;
+        // v2.4.13: tilt_up REMOVED. TiltUp and TiltDown are now both
+        // separate zones that run every session, nothing left to toggle.
         public List<ZoneRecord> zones = new List<ZoneRecord>();
     }
     [Serializable]
@@ -1128,7 +1237,6 @@ public class EchoesScanController : MonoBehaviour
                 guided_scan_mode = !freeScanMode,
                 zone_sequence = seq,
                 zone_duration_setting = zoneDurationSeconds,
-                tilt_up = tiltUp,
                 zones = _zoneRecords
             },
             camera_intrinsics = _cameraIntrinsics,   // may be null -> serialises as default object
