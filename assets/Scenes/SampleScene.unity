@@ -554,6 +554,7 @@ Transform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
+  - {fileID: 1707269218}
   - {fileID: 1828601336}
   - {fileID: 65284394}
   m_Father: {fileID: 0}
@@ -570,6 +571,14 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 910ea4cff266a2b4f8219b692c291da7, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ARDebugManager
+  arSession: {fileID: 0}
+  planeManager: {fileID: 0}
+  pointCloudManager: {fileID: 0}
+  debugText: {fileID: 0}
+  mergeRadius: 0.15
+  minPlaneY: 0.3
+  coplanarYTol: 0.05
+  deltaThresholdMetres: 0.01
 --- !u!114 &223974235
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -5758,6 +5767,53 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1707269217
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1707269218}
+  - component: {fileID: 1707269219}
+  m_Layer: 0
+  m_Name: EchoesYoloDetector
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1707269218
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1707269217}
+  serializedVersion: 2
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 223974233}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1707269219
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1707269217}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: de2a8e54ea349c74da7d22a31c909063, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::EchoesYoloDetector
+  modelAsset: {fileID: 5022602860645237092, guid: 0c911b712ccbe9248964a6787cc714da, type: 3}
+  backend: 512
+  confidenceThreshold: 0.25
 --- !u!1 &1828601335
 GameObject:
   m_ObjectHideFlags: 0

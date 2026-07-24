@@ -1,8 +1,58 @@
 // ============================================================
 //  EchoesScanController.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: v2.4.13 | 22 July 2026
+//  Version: v2.5.0 | 23 July 2026
 //
+//  v2.5.0 — YOLO Phase 1: On-Device Detection, Logging Only
+//  ----------------------------------------------------------
+//  Full reasoning for every decision below lives in Echoes_v2.5.0_Spec.md.
+//  This is the changelog summary, not the rationale.
+//
+//  FIX ROTATION — TryCaptureImage() previously only applied MirrorY.
+//              Confirmed by direct inspection of a captured still: the
+//              raw XRCpuImage comes back in the sensor's native landscape
+//              orientation regardless of the phone being held in
+//              portrait, and nothing corrected for that. Hard
+//              prerequisite for YOLO, inference cannot run correctly on
+//              sideways pixels. New imageRotationDegrees public field
+//              (default 90) makes the direction a one-line Inspector fix
+//              if a given device's sensor mounting needs the opposite
+//              rotation, no redeploy required.
+//              ROLLBACK: restore the four-line pre-fix TryCaptureImage
+//              body, remove RotateRgba32() and imageRotationDegrees.
+//
+//  YOLO DETECTION — new public yoloDetector field (EchoesYoloDetector,
+//              new file, same version). Null-guarded throughout, an
+//              unassigned detector means every session runs exactly as
+//              v2.4.13 did, empty detections lists, nothing else
+//              changes. Runs synchronously per still, all six zones,
+//              right after each still write, in both the guided-zone
+//              and free-scan capture paths.
+//              SCOPE, stated here as well as in the spec because this is
+//              the boundary most likely to drift: detections are LOGGED
+//              ONLY. No plane binding, no spatial fusion. That is
+//              Cortex's job and Cortex does not exist yet.
+//              ROLLBACK: remove the yoloDetector field, the two call
+//              sites in CaptureStillForZone/CaptureStillFreeScan, the
+//              DetectionEntry class, and StillEntry.detections.
+//
+//  MANIFEST — StillEntry gains detections: List<DetectionEntry>,
+//              nested per-still exactly like plane_details nests per
+//              plane snapshot. Supersedes the original storage doc's
+//              yolo_detections.json line, see spec Section 6 for why.
+//              Confidence threshold 0.25. source field is always the
+//              literal string "YOLO_ondevice", matching the observation
+//              source contract in the vision doc exactly, Cortex will
+//              eventually pattern-match on it.
+//
+//  NOT INCLUDED THIS VERSION: ARCore Scene Semantics. Confirmed via
+//              current official documentation to be outdoor-only
+//              ("usage indoors is currently unsupported"), contradicting
+//              the vision doc's note describing it as giving indoor
+//              surface labels. Dropped from scope entirely, not
+//              deferred, the vision doc note needs correcting.
+//
+//  ----------------------------------------------------------
 //  v2.4.13 — Six-Zone Sequence, Loop Closure, Real Duration Logging
 //  ----------------------------------------------------------
 //  ZONE RESTRUCTURE — Zone enum extended from four zones
@@ -209,7 +259,7 @@ using TMPro;
 
 public class EchoesScanController : MonoBehaviour
 {
-    private const string VERSION = "v2.4.13";
+    private const string VERSION = "v2.5.0";
 
     [HideInInspector] public BorderColorRelay borderRelay;
     [HideInInspector] public TextMeshProUGUI promptText;
@@ -226,6 +276,10 @@ public class EchoesScanController : MonoBehaviour
     // existed and was already written top-level into the manifest; this
     // is the missing entry point, not a new manifest field.
     [HideInInspector] public TMP_InputField testCodeField;
+
+    [Header("YOLO Phase 1 (v2.5.0)")]
+    [Tooltip("Optional. If unassigned, detection is skipped entirely and every other v2.5.0 field just stays an empty list, sessions run exactly as v2.4.13 did. See v2.5.0 spec Section 7: this component only detects and logs, it never binds a detection to a plane.")]
+    public EchoesYoloDetector yoloDetector;
 
     [Header("Pose Gate")]
     public bool gateOnPitch = true;
@@ -370,6 +424,15 @@ public class EchoesScanController : MonoBehaviour
         public float focal_length_x, focal_length_y, principal_point_x, principal_point_y;
         public int image_width, image_height;
     }
+    // v2.5.0: one YOLO detection. source is always "YOLO_ondevice" this
+    // phase, per the observation source contract in the vision doc.
+    // bbox is [x, y, w, h] in the ROTATED (correctly oriented) still's own
+    // pixel space, top-left origin, not normalised 0-1.
+    [Serializable]
+    public class DetectionEntry
+    {
+        public string label, source; public float confidence; public float[] bbox;
+    }
     [Serializable]
     public class StillEntry
     {
@@ -385,6 +448,11 @@ public class EchoesScanController : MonoBehaviour
         // this equals zoneDurationSeconds under normal operation; it
         // catches timer drift, not an operator holding past guidance.
         public float actual_zone_seconds;
+        // v2.5.0: YOLO Phase 1. Detections only, logged flat here rather
+        // than a separate yolo_detections.json, see v2.5.0 spec Section 6.
+        // Confidence threshold 0.25, NOT bound to any plane, see spec
+        // Section 7, that is Cortex's job and Cortex does not exist yet.
+        public List<DetectionEntry> detections = new List<DetectionEntry>();
     }
     [Serializable]
     public class PlaneDetail
@@ -467,6 +535,15 @@ public class EchoesScanController : MonoBehaviour
         _pointCloudManager = FindObjectOfType<ARPointCloudManager>();
         _occlusionManager = FindObjectOfType<AROcclusionManager>();
         _debugManager = FindObjectOfType<ARDebugManager>();
+        // v2.5.0 FIX WIRING: this was declared and used but never actually
+        // found, meaning it was always null regardless of scene setup, a
+        // real bug, not a deploy-guide typo. The controller has no
+        // persistent scene presence to manually drag an Inspector
+        // reference into (see the header comment on Start(), it is
+        // created at runtime by Bootstrap), so this has to be
+        // auto-discovered exactly like every other dependency above.
+        if (yoloDetector == null) yoloDetector = FindObjectOfType<EchoesYoloDetector>();
+        Diag($"  EchoesYoloDetector found={yoloDetector != null}");
 
         Diag($"  ARCameraManager null={_cameraManager == null}  ARPlaneManager null={_planeManager == null}");
 
@@ -946,6 +1023,21 @@ public class EchoesScanController : MonoBehaviour
             pitch_delta_from_origin = pitchDelta,
             actual_zone_seconds = actualZoneSeconds
         });
+
+        // v2.5.0: YOLO Phase 1. Runs synchronously right after the still
+        // write, against the now-correctly-rotated PNG (the rotation fix
+        // above is a hard prerequisite, see v2.5.0 spec Section 5). All
+        // six zones get inference, including ReturnCentre, see spec
+        // Section 5 for why that is deliberate, not an oversight.
+        // Detector is null-guarded so a session still completes cleanly
+        // end to end even if the model failed to load, matching the
+        // existing pattern of every other optional subsystem in this
+        // file (overlay, testCodeField, uploader).
+        if (yoloDetector != null)
+        {
+            _stills[_stills.Count - 1].detections = yoloDetector.Detect(filepath);
+        }
+
         LogEvent($"{z} STILL {filename}");
         RecordPlaneSnapshot("still_sync", idx);
         LogProcessingEvent($"still_{idx}_captured", idx == 0 ? new[] { "yolo_inference", "scale_calibration", "srl_query" } : new[] { "yolo_inference", "mvs_partial_reconstruction" });
@@ -976,12 +1068,21 @@ public class EchoesScanController : MonoBehaviour
             tracking = ARSession.state.ToString(),
             pose_matrix_4x4 = GetCameraPoseMatrix()
         });
+        // v2.5.0: same YOLO hook as CaptureStillForZone, kept consistent
+        // across both capture paths.
+        if (yoloDetector != null)
+        {
+            _stills[_stills.Count - 1].detections = yoloDetector.Detect(filepath);
+        }
         LogEvent($"FREE STILL {filename}");
         RecordPlaneSnapshot("still_sync", idx);
         LogProcessingEvent($"still_{idx}_captured", idx == 0 ? new[] { "yolo_inference", "scale_calibration", "srl_query" } : new[] { "yolo_inference", "mvs_partial_reconstruction" });
         if (overlay != null) overlay.FlashCapture();
         OnStillCaptured?.Invoke(idx, filepath);
     }
+
+    [Tooltip("v2.5.0: clockwise rotation applied to captured stills. Default 90, correct for every device tested. If a still still looks wrong after this fix, try 270 here first, that is the whole fix, no redeploy needed.")]
+    public int imageRotationDegrees = 90;
 
     private bool TryCaptureImage(string filepath)
     {
@@ -992,11 +1093,57 @@ public class EchoesScanController : MonoBehaviour
             var cp = new XRCpuImage.ConversionParams { inputRect = new RectInt(0, 0, image.width, image.height), outputDimensions = new Vector2Int(image.width, image.height), outputFormat = TextureFormat.RGBA32, transformation = XRCpuImage.Transformation.MirrorY };
             var buf = new NativeArray<byte>(image.GetConvertedDataSize(cp), Allocator.Temp);
             image.Convert(cp, buf);
-            var tex = new Texture2D(image.width, image.height, TextureFormat.RGBA32, false);
-            tex.LoadRawTextureData(buf); tex.Apply(); buf.Dispose();
+
+            // v2.5.0 FIX ROTATION: XRCpuImage comes back in the sensor's
+            // native landscape orientation regardless of how the phone is
+            // physically held. Every scan in this project holds the phone
+            // in portrait, confirmed directly from a captured still (see
+            // v2.5.0 spec). MirrorY alone (the pre-existing transform)
+            // never corrected for this, it solves a different problem
+            // (pixel row order), not device rotation.
+            int srcW = image.width, srcH = image.height;
+            byte[] rotated = RotateRgba32(buf.ToArray(), srcW, srcH, imageRotationDegrees);
+            buf.Dispose();
+            bool swapped = (imageRotationDegrees == 90 || imageRotationDegrees == 270);
+            int outW = swapped ? srcH : srcW;
+            int outH = swapped ? srcW : srcH;
+
+            var tex = new Texture2D(outW, outH, TextureFormat.RGBA32, false);
+            tex.LoadRawTextureData(rotated); tex.Apply();
             File.WriteAllBytes(filepath, tex.EncodeToPNG()); Destroy(tex);
         }
         return true;
+    }
+
+    // v2.5.0: rotates a raw RGBA32 byte buffer by 0/90/180/270 degrees
+    // clockwise. Plain array math, no Unity-specific rotation API relied
+    // on, so this is deterministic and easy to hand-verify against a
+    // known image if it is ever in doubt.
+    private byte[] RotateRgba32(byte[] src, int width, int height, int degrees)
+    {
+        const int bpp = 4;
+        if (degrees == 0) return src;
+        int outW = (degrees == 180) ? width : height;
+        byte[] dst = new byte[src.Length];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int srcIdx = (y * width + x) * bpp;
+                int dx, dy;
+                switch (degrees)
+                {
+                    case 90:  dx = height - 1 - y; dy = x;              break;
+                    case 180: dx = width - 1 - x;  dy = height - 1 - y; break;
+                    case 270: dx = y;              dy = width - 1 - x; break;
+                    default:  dx = x;              dy = y;             break;
+                }
+                int dstIdx = (dy * outW + dx) * bpp;
+                dst[dstIdx] = src[srcIdx]; dst[dstIdx + 1] = src[srcIdx + 1];
+                dst[dstIdx + 2] = src[srcIdx + 2]; dst[dstIdx + 3] = src[srcIdx + 3];
+            }
+        }
+        return dst;
     }
 
     private PlaneEntry RecordPlaneSnapshot(string reason, int syncedStill)
