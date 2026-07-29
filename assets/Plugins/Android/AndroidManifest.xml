@@ -1,14 +1,23 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.unity3d.player" xmlns:tools="http://schemas.android.com/tools">
-  <application android:usesCleartextTraffic="false" android:allowBackup="false">
-    <activity android:name="com.unity3d.player.appui.AppUIGameActivity" android:theme="@style/BaseUnityGameActivityTheme" android:configChanges="fontScale|keyboard|keyboardHidden|locale|mnc|mcc|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|touchscreen">
-      <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.LAUNCHER" />
-      </intent-filter>
-      <meta-data android:name="unityplayer.UnityActivity" android:value="true" />
-      <meta-data android:name="android.app.lib_name" android:value="game" />
-    </activity>
-  </application>
-  <uses-permission android:name="android.permission.VIBRATE" />
+	<application android:usesCleartextTraffic="false" android:allowBackup="false">
+		<activity android:name="com.unity3d.player.appui.AppUIGameActivity" android:theme="@style/BaseUnityGameActivityTheme" android:configChanges="fontScale|keyboard|keyboardHidden|locale|mnc|mcc|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|touchscreen">
+			<intent-filter>
+				<action android:name="android.intent.action.MAIN" />
+				<category android:name="android.intent.category.LAUNCHER" />
+			</intent-filter>
+			<meta-data android:name="unityplayer.UnityActivity" android:value="true" />
+			<meta-data android:name="android.app.lib_name" android:value="game" />
+		</activity>
+	</application>
+	<uses-permission android:name="android.permission.VIBRATE" />
+	<!-- v2.5.1 FIX: this app has never needed network access before (ARCore,
+       YOLO, and local file writes are all fully offline), so INTERNET was
+       never added. Confirmed missing via adb logcat: every upload attempt
+       failed with "Cannot connect to destination host", the exact
+       signature of Android blocking network access at the OS level for
+       an app lacking this permission, not a URL, WiFi, or deployment
+       problem. This is the actual root cause of Mode B never firing.
+       ROLLBACK: delete this line, reverts to fully offline (Mode A only). -->
+	<uses-permission android:name="android.permission.INTERNET" />
 </manifest>

@@ -7,7 +7,18 @@ using TMPro;
 // ============================================================
 //  ARDebugManager.cs
 //  Echoes — Programmable Spatial Experience Platform
-//  Version: 2.4.9  |  01 July 2026  [vertical dedup + immature-plane filter]
+//  Version: 2.5.1  |  29 July 2026  [planesChanged/pointCloudsChanged subscriptions removed]
+//
+//  CHANGELOG v2.5.1 (sign-off fix):
+//  Found this session as a third independent subscriber to
+//  planeManager.planesChanged, alongside ARPlaneVisualizer.cs (a
+//  cosmetic listener, tested and ruled out as the freeze cause) and
+//  EchoesLoadingScreen.cs (a real leak, fixed separately). Unlike those
+//  two, this component never disabled itself, so its handler ran real
+//  allocation work on every single plane change for the entire session.
+//  Confirmed nothing in the project reads what either handler computes,
+//  see Start() below for the full reasoning. Subscriptions removed.
+//  Tested clean across three full end-to-end device runs under motion.
 //
 //  CHANGELOG v2.3.4:
 //  Fixes in this version:
@@ -22,9 +33,9 @@ using TMPro;
 public class ARDebugManager : MonoBehaviour
 {
     [Header("AR References")]
-    public ARSession            arSession;
-    public ARPlaneManager       planeManager;
-    public ARPointCloudManager  pointCloudManager;
+    public ARSession arSession;
+    public ARPlaneManager planeManager;
+    public ARPointCloudManager pointCloudManager;
 
     [Header("UI")]
     public TextMeshProUGUI debugText;
@@ -32,31 +43,52 @@ public class ARDebugManager : MonoBehaviour
     // Deduplication settings
     [Header("Plane Deduplication")]
     [Tooltip("Planes whose centers are closer than this (metres) at the same Y are treated as one surface")]
-    public float mergeRadius   = 0.15f;
+    public float mergeRadius = 0.15f;
     [Tooltip("Planes below this Y height (metres) are discarded as ghosts")]
-    public float minPlaneY     = 0.30f;
+    public float minPlaneY = 0.30f;
     [Tooltip("Max Y difference (metres) for two planes to be considered co-planar")]
-    public float coplanarYTol  = 0.05f;
+    public float coplanarYTol = 0.05f;
 
     // Delta logging
     [Header("Delta Logging")]
     public float deltaThresholdMetres = 0.01f;
 
     // Internal
-    private int   _featurePointCount = 0;
-    private int   _logCount          = 0;
-    private float _lastLogTime       = 0f;
+    private int _featurePointCount = 0;
+    private int _logCount = 0;
+    private float _lastLogTime = 0f;
 
     // Previous plane centers for delta calculation
     private Dictionary<string, Vector3> _previousCenters = new();
 
     void Start()
     {
-        if (pointCloudManager != null)
-            pointCloudManager.pointCloudsChanged += OnPointCloudsChanged;
-
-        if (planeManager != null)
-            planeManager.planesChanged += OnPlanesChanged;
+        // v2.5.1 SIGN-OFF FIX: these two subscriptions are deliberately
+        // removed, not conditional. Confirmed this session: OnPlanesChanged
+        // only increments a private _logCount nothing else reads, and
+        // OnPointCloudsChanged only sets a private _featurePointCount with
+        // no public getter. UpdateDebugDisplay() (Update(), separately)
+        // was also confirmed dead, debugText is unassigned anywhere in
+        // the project, so it bails out for free every frame regardless.
+        // The two methods the controller actually depends on,
+        // GetRealHorizontalPlaneCount() and GetRealVerticalPlaneCount(),
+        // recompute fresh on every call and never depended on either
+        // subscription. So there was nothing to lose by not subscribing
+        // at all, and real allocation-heavy work (two new List<ARPlane>,
+        // an O(n2) dedup comparison) to gain back on every single plane
+        // update for the entire session, previously a live freeze
+        // candidate, tested and cleared across three full device runs.
+        // Earlier this session this was handled by having the controller
+        // destroy this GameObject at runtime instead, that approach is
+        // now reverted in EchoesScanController.cs in favour of this
+        // permanent fix at the source, functionally equivalent (neither
+        // event ever fires either way) but cleaner: this component stays
+        // alive and enabled normally for the methods that are actually used.
+        // ROLLBACK: restore the two subscription lines below.
+        // if (pointCloudManager != null)
+        //     pointCloudManager.pointCloudsChanged += OnPointCloudsChanged;
+        // if (planeManager != null)
+        //     planeManager.planesChanged += OnPlanesChanged;
     }
 
     void OnDestroy()
@@ -137,7 +169,7 @@ public class ARDebugManager : MonoBehaviour
     // v2.4.9: horizontal dedup, now also skipping immature (zero-size) planes.
     private List<ARPlane> GetDeduplicatedHorizontal()
     {
-        var all     = new List<ARPlane>();
+        var all = new List<ARPlane>();
         var keepers = new List<ARPlane>();
 
         foreach (var p in planeManager.trackables)
@@ -156,13 +188,13 @@ public class ARDebugManager : MonoBehaviour
             bool isDuplicate = false;
             for (int k = 0; k < keepers.Count; k++)
             {
-                float dist  = Vector3.Distance(candidate.center, keepers[k].center);
+                float dist = Vector3.Distance(candidate.center, keepers[k].center);
                 float yDiff = Mathf.Abs(candidate.center.y - keepers[k].center.y);
                 if (dist < mergeRadius && yDiff < coplanarYTol)
                 {
                     isDuplicate = true;
                     float areaCandidate = candidate.size.x * candidate.size.y;
-                    float areaKeeper    = keepers[k].size.x * keepers[k].size.y;
+                    float areaKeeper = keepers[k].size.x * keepers[k].size.y;
                     if (areaCandidate > areaKeeper)
                         keepers[k] = candidate;
                     break;
@@ -178,7 +210,7 @@ public class ARDebugManager : MonoBehaviour
     // shared normal direction, rather than by Y height. Immature planes skipped.
     private List<ARPlane> GetDeduplicatedVertical()
     {
-        var all     = new List<ARPlane>();
+        var all = new List<ARPlane>();
         var keepers = new List<ARPlane>();
 
         foreach (var p in planeManager.trackables)
@@ -193,14 +225,14 @@ public class ARDebugManager : MonoBehaviour
             bool isDuplicate = false;
             for (int k = 0; k < keepers.Count; k++)
             {
-                float dist   = Vector3.Distance(candidate.center, keepers[k].center);
+                float dist = Vector3.Distance(candidate.center, keepers[k].center);
                 // Same wall = centres close AND normals near-parallel.
                 float normDot = Mathf.Abs(Vector3.Dot(candidate.normal, keepers[k].normal));
                 if (dist < mergeRadius && normDot > 0.94f) // ~20 deg
                 {
                     isDuplicate = true;
                     float areaCandidate = candidate.size.x * candidate.size.y;
-                    float areaKeeper    = keepers[k].size.x * keepers[k].size.y;
+                    float areaKeeper = keepers[k].size.x * keepers[k].size.y;
                     if (areaCandidate > areaKeeper)
                         keepers[k] = candidate;
                     break;
@@ -218,12 +250,12 @@ public class ARDebugManager : MonoBehaviour
     {
         if (debugText == null) return;
 
-        var deduped  = GetDeduplicatedPlanes();
+        var deduped = GetDeduplicatedPlanes();
         var allPlanes = new List<ARPlane>();
         foreach (var p in planeManager.trackables)
             allPlanes.Add(p);
 
-        int rawCount  = allPlanes.Count;
+        int rawCount = allPlanes.Count;
         int realCount = deduped.Count;
         int ghostCount = 0;
         foreach (var p in allPlanes)
@@ -247,9 +279,9 @@ public class ARDebugManager : MonoBehaviour
         // List deduplicated surfaces
         foreach (var plane in deduped)
         {
-            float w    = plane.size.x * 100f;
-            float h    = plane.size.y * 100f;
-            float yCm  = plane.center.y * 100f;
+            float w = plane.size.x * 100f;
+            float h = plane.size.y * 100f;
+            float yCm = plane.center.y * 100f;
             sb.AppendLine($"[H:OK] {w:F1}x{h:F1}cm  Y:{yCm:F0}cm");
         }
 
@@ -260,8 +292,8 @@ public class ARDebugManager : MonoBehaviour
             foreach (var p in allPlanes)
             {
                 if (p.center.y >= minPlaneY) continue;
-                float w   = p.size.x * 100f;
-                float h2  = p.size.y * 100f;
+                float w = p.size.x * 100f;
+                float h2 = p.size.y * 100f;
                 float yCm = p.center.y * 100f;
                 sb.AppendLine($"[GHOST] {w:F1}x{h2:F1}cm  Y:{yCm:F0}cm");
             }

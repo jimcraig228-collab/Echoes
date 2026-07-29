@@ -8,6 +8,27 @@ using TMPro;
 // ============================================================
 //  EchoesLoadingScreen.cs  (v2 — uses EchoesRingRenderer)
 //
+//  v2.5.1 FIX (28 July) — real bug, not an experiment. This script
+//  subscribed to planeManager.planesChanged in Start() and only ever
+//  unsubscribed in OnDestroy(). But the object is never destroyed, only
+//  disabled via SetActive(false) at the end of FadeOut(), so OnDestroy()
+//  never fired and the subscription silently outlived the whole loading
+//  screen. OnPlanesChanged (-> SetPhase()) kept running for the rest of
+//  every session on every single plane update, doing real work
+//  (SetActive() and colour changes on an inactive hierarchy, and
+//  re-triggering StartCoroutine(FadeOut()) on a disabled object every
+//  time since _phase was already Ready, which Unity rejects and logs an
+//  error for). Plane updates fire far more often under motion, exactly
+//  the same category of issue already suspected in ARPlaneVisualizer.cs,
+//  in a second, independent listener nobody had looked at yet. Fixed by
+//  unsubscribing in FadeOut() itself, the one real endpoint of this
+//  object's active life, not only in OnDestroy(), which stays in place
+//  as a safety net for a genuine destroy path.
+//  ROLLBACK: remove the "planeManager.planesChanged -= OnPlanesChanged;"
+//  line added to FadeOut(). OnDestroy()'s existing unsubscribe is
+//  untouched either way.
+// ============================================================
+//
 //  WHAT THIS DOES:
 //  Builds the entire Echoes branded loading / scanning screen
 //  in C# at runtime. No prefabs, no sprites, no editor work.
@@ -196,6 +217,22 @@ public class EchoesLoadingScreen : MonoBehaviour
             _group.alpha = Mathf.Lerp(1f, 0f, t / fadeOutDuration);
             yield return null;
         }
+        // v2.5.1 FIX LEAK: SetActive(false) does NOT trigger OnDestroy(),
+        // so the planesChanged subscription taken out in Start() was
+        // never actually released, only OnDestroy() unsubscribed it, and
+        // OnDestroy() never fires for an object that is merely disabled.
+        // That meant OnPlanesChanged kept firing for the rest of every
+        // session, on every single plane update, touching child
+        // SetActive() calls and colors on an inactive hierarchy, and
+        // since _phase was already Ready, re-triggering
+        // StartCoroutine(FadeOut()) on a now-disabled GameObject every
+        // time too, which Unity rejects and logs an error for. This is
+        // the actual fix: unsubscribe here, at the one real endpoint of
+        // this object's active life, not only in OnDestroy(), which
+        // stays as a safety net for the case where the object genuinely
+        // is destroyed rather than just hidden.
+        if (planeManager != null)
+            planeManager.planesChanged -= OnPlanesChanged;
         gameObject.SetActive(false);
     }
 
